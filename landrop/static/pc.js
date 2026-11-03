@@ -12,8 +12,7 @@ const IMAGE_EXT = /\.(jpe?g|png|gif|webp|bmp|avif)$/i;
 // 一覧の自動更新の間隔。自動更新は「操作」に数えないので、開いたままでも自動停止は効く
 const POLL_MS = 2000;
 const STATUS_POLL_MS = 5000;
-// 閉じられた窓と区別するため、画面ごとにIDを付けてサーバーに伝える
-const PAGE_ID = crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`;
+const AUTO_HEADERS = { "X-LanDrop-Auto": "1" };
 
 const state = {
   tab: "share",
@@ -39,8 +38,7 @@ class Stopped extends Error {}
 // ---------- サーバーとの通信 ----------
 
 async function api(path, { method = "GET", auto = false } = {}) {
-  const headers = { "X-LanDrop-Page": PAGE_ID };
-  if (auto) headers["X-LanDrop-Auto"] = "1";
+  const headers = auto ? AUTO_HEADERS : {};
   let response;
   try {
     response = await fetch(path, { method, headers, cache: "no-store", credentials: "same-origin" });
@@ -63,6 +61,31 @@ async function api(path, { method = "GET", auto = false } = {}) {
 
 function query(params) {
   return new URLSearchParams(params).toString();
+}
+
+// 画面が開いている間、サーバーとの接続をつないでおく。サーバーはこれが切れたら、画面が閉じられたとみなす
+async function holdConnection() {
+  try {
+    const response = await fetch("/pc/api/events", { headers: AUTO_HEADERS, cache: "no-store", credentials: "same-origin" });
+    if (response.ok) {
+      const reader = response.body.getReader();
+      while (!(await reader.read()).done) {
+        // 中身は使わない。つながっていることだけが大事
+      }
+    }
+  } catch {
+    // 下で状態を確かめる
+  }
+  // 切れたのは、サーバーが止まったか一時的な失敗。動いていれば、つなぎ直す
+  for (let attempt = 0; attempt < 2 && !state.stopped; attempt += 1) {
+    try {
+      await api("/pc/api/status", { auto: true });
+      setTimeout(holdConnection, 500);
+      return;
+    } catch {
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+  }
 }
 
 function previewUrl(folder, file) {
@@ -420,7 +443,6 @@ function upload(item) {
 
     xhr.open("POST", `/pc/api/share?${query({ name: item.file.name })}`);
     xhr.setRequestHeader("Content-Type", "application/octet-stream");
-    xhr.setRequestHeader("X-LanDrop-Page", PAGE_ID);
     xhr.upload.addEventListener("progress", (event) => {
       item.loaded = event.loaded;
       renderQueueItem(item);
@@ -639,10 +661,6 @@ document.addEventListener("DOMContentLoaded", () => {
   setupViewer();
   setupStop();
 
-  // 窓を閉じたら、サーバーに伝えて停止させる（再読み込みなら、すぐに開き直されるので止まらない）
-  window.addEventListener("pagehide", () => {
-    if (!state.stopped) navigator.sendBeacon(`/pc/api/closed?${query({ page: PAGE_ID })}`);
-  });
   window.addEventListener("beforeunload", (event) => {
     if (state.queue.some((item) => item.status === "waiting" || item.status === "uploading")) {
       event.preventDefault();
@@ -653,6 +671,7 @@ document.addEventListener("DOMContentLoaded", () => {
   loadStatus();
   loadFolder("share");
   loadFolder("received");
+  holdConnection();
   setInterval(() => {
     if (state.stopped) return;
     loadFolder("share", true);

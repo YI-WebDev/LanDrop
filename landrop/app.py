@@ -2,24 +2,25 @@
 
 from __future__ import annotations
 
+import asyncio
 import mimetypes
 import re
 import secrets
 import sys
 import threading
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from fastapi import FastAPI, Request
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.requests import ClientDisconnect
 
 from landrop import desktop
 from landrop.filenames import content_disposition
-from landrop.idle import ActivityMiddleware, IdleTracker, PcPages, StopRequest
+from landrop.idle import ActivityMiddleware, IdleTracker, StopRequest
 from landrop.qr import render_qr_svg
 from landrop.security import (
     AUTH_PATH,
@@ -37,8 +38,8 @@ from landrop.storage import Receiver, UploadError, find_file, list_files
 
 STATIC_DIR = Path(__file__).parent / "static"
 _CONTENT_LENGTH = re.compile(r"[0-9]+")
-# PCの画面が、自分を見分けるために付けるヘッダー
-_PAGE_HEADER = "x-landrop-page"
+# PCの画面とのつなぎっぱなしの接続で、停止の依頼がないか確かめる間隔
+_EVENTS_CHECK_SECONDS = 0.5
 
 # PCの画面で中身を表示してよい種類。HTMLやSVGのように、開くとスクリプトが動く形式は含めない
 PREVIEW_TYPES = {
@@ -128,7 +129,8 @@ def create_app(config: AppConfig) -> FastAPI:
     # PCから共有フォルダへの追加。スマホからの受信と違い上限は設けない（空き容量は確認する）
     sharer = Receiver(config.share_dir, sys.maxsize)
     folders = {"share": config.share_dir, "received": config.received_dir}
-    pc_pages = PcPages()
+    # 開いているPCの画面の数（つなぎっぱなしの接続の数）
+    open_windows = 0
 
     def find_in(folder: str, name: str) -> Path | None:
         path = folders.get(folder)
@@ -139,13 +141,12 @@ def create_app(config: AppConfig) -> FastAPI:
         except OSError:
             return None
 
-    def page_seen(request: Request) -> None:
-        pc_pages.seen(request.headers.get(_PAGE_HEADER, "")[:64])
-
     def stop_when_closed() -> None:
-        # ほかの画面が開いているか、転送中なら、しばらくしてから確かめ直す
-        # （閉じる連絡を送れずに消えた画面も、連絡が途絶えれば閉じたとみなされる）
-        if pc_pages.any_open() or receiver.in_progress or config.tracker.active_requests:
+        if open_windows:
+            # 再読み込みや、別の窓で開き直された
+            return
+        if receiver.in_progress or config.tracker.active_requests:
+            # 転送中なら、終わるのを待ってから止める
             _later(config.close_grace_seconds, stop_when_closed)
             return
         config.stop.request("PCの画面が閉じられたため、停止しました。")
@@ -211,8 +212,7 @@ def create_app(config: AppConfig) -> FastAPI:
         return FileResponse(STATIC_DIR / "pc.html", media_type="text/html; charset=utf-8")
 
     @app.get(PC_PREFIX + "/api/status")
-    def pc_status(request: Request) -> dict[str, object]:
-        page_seen(request)
+    def pc_status() -> dict[str, object]:
         return {
             "pc_name": config.pc_name,
             "address": config.base_url,
@@ -227,9 +227,29 @@ def create_app(config: AppConfig) -> FastAPI:
     def pc_qr() -> Response:
         return Response(render_qr_svg(config.access_url), media_type="image/svg+xml")
 
+    @app.get(PC_PREFIX + "/api/events")
+    def pc_events() -> StreamingResponse:
+        """PCの画面が開いている間つないでおく接続。切れたら、画面が閉じられたとみなす。
+
+        窓を閉じるとブラウザごと終了することもあるため、閉じるときの連絡には頼らない。
+        """
+
+        async def stream() -> AsyncIterator[bytes]:
+            nonlocal open_windows
+            open_windows += 1
+            try:
+                yield b"open\n"
+                # 停止するときは、こちらから接続を終えてサーバーの終了を待たせない
+                while config.stop.reason is None:
+                    await asyncio.sleep(_EVENTS_CHECK_SECONDS)
+            finally:
+                open_windows -= 1
+                _later(config.close_grace_seconds, stop_when_closed)
+
+        return StreamingResponse(stream(), media_type="text/plain")
+
     @app.get(PC_PREFIX + "/api/files/{folder}")
-    def pc_files(request: Request, folder: str) -> Response:
-        page_seen(request)
+    def pc_files(folder: str) -> Response:
         path = folders.get(folder)
         if path is None:
             return _error(404, "フォルダが見つかりません。")
@@ -287,15 +307,6 @@ def create_app(config: AppConfig) -> FastAPI:
         if not is_same_origin(request):
             return _error(403, "このページ以外からの操作は受け付けません。")
         config.stop.request("PCの画面から停止しました。")
-        return Response(status_code=202)
-
-    @app.post(PC_PREFIX + "/api/closed")
-    def pc_closed(request: Request, page: str = "") -> Response:
-        # 画面を閉じるときに navigator.sendBeacon で送られる
-        if not is_same_origin(request):
-            return _error(403, "このページ以外からの操作は受け付けません。")
-        pc_pages.closed(page[:64])
-        _later(config.close_grace_seconds, stop_when_closed)
         return Response(status_code=202)
 
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")

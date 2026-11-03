@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
@@ -245,35 +246,137 @@ def test_stop_button_requests_stop(make_pc: PcFactory) -> None:
     assert config.stop.reason == "PCの画面から停止しました。"
 
 
-def test_closing_the_last_window_stops(make_pc: PcFactory) -> None:
-    client, config = make_pc(close_grace_seconds=0.05)
-    client.get("/pc/api/status", headers={"X-LanDrop-Page": "window-1"})
+def _local_scope(path: str) -> dict:
+    return {
+        "type": "http",
+        "asgi": {"version": "3.0", "spec_version": "2.3"},
+        "http_version": "1.1",
+        "method": "GET",
+        "scheme": "http",
+        "path": path,
+        "raw_path": path.encode(),
+        "query_string": b"",
+        "root_path": "",
+        "headers": [
+            (b"host", f"127.0.0.1:{PORT}".encode()),
+            (b"cookie", f"landrop_pc={PC_SESSION_KEY}".encode()),
+            (b"x-landrop-auto", b"1"),
+        ],
+        "client": ("127.0.0.1", 50000),
+        "server": ("127.0.0.1", PORT),
+    }
 
-    client.post("/pc/api/closed?page=window-1", headers=LOCAL_ORIGIN)
+
+async def _window(app: Callable, opened: asyncio.Event, close: asyncio.Event) -> None:
+    """PCの画面1つ分の、つなぎっぱなしの接続。close がセットされたら切断する。"""
+    first = True
+
+    async def receive() -> dict:
+        nonlocal first
+        if first:
+            first = False
+            return {"type": "http.request", "body": b"", "more_body": False}
+        await close.wait()
+        return {"type": "http.disconnect"}
+
+    async def send(message: dict) -> None:
+        if message["type"] == "http.response.body" and message.get("body"):
+            opened.set()
+
+    await app(_local_scope("/pc/api/events"), receive, send)
+
+
+def _pc_config(make_config: Callable[..., AppConfig], **overrides: object) -> AppConfig:
+    return make_config(pc_token=PC_TOKEN, pc_session_key=PC_SESSION_KEY, **overrides)
+
+
+def test_closing_the_last_window_stops(make_config: Callable[..., AppConfig]) -> None:
+    config = _pc_config(make_config, close_grace_seconds=0.05)
+    app = create_app(config)
+
+    async def run() -> None:
+        opened, close = asyncio.Event(), asyncio.Event()
+        window = asyncio.create_task(_window(app, opened, close))
+        await opened.wait()
+        close.set()
+        await window
+
+    asyncio.run(run())
 
     assert _wait_until(lambda: config.stop.reason is not None)
     assert config.stop.reason == "PCの画面が閉じられたため、停止しました。"
 
 
-def test_reloading_the_window_does_not_stop(make_pc: PcFactory) -> None:
-    client, config = make_pc(close_grace_seconds=0.1)
-    client.get("/pc/api/status", headers={"X-LanDrop-Page": "before-reload"})
+def test_reloading_the_window_does_not_stop(make_config: Callable[..., AppConfig]) -> None:
+    config = _pc_config(make_config, close_grace_seconds=0.1)
+    app = create_app(config)
 
-    client.post("/pc/api/closed?page=before-reload", headers=LOCAL_ORIGIN)
-    # 再読み込みで開き直された画面
-    client.get("/pc/api/status", headers={"X-LanDrop-Page": "after-reload"})
+    async def run() -> None:
+        before = (asyncio.Event(), asyncio.Event())
+        task = asyncio.create_task(_window(app, *before))
+        await before[0].wait()
+        before[1].set()
+        await task
+        # 再読み込みで開き直された画面
+        after = (asyncio.Event(), asyncio.Event())
+        task = asyncio.create_task(_window(app, *after))
+        await after[0].wait()
+        await asyncio.sleep(0.4)
+        assert config.stop.reason is None
+        after[1].set()
+        await task
 
-    time.sleep(0.4)
-    assert config.stop.reason is None
+    asyncio.run(run())
+
+    assert _wait_until(lambda: config.stop.reason is not None)
 
 
-def test_closing_waits_for_transfers(make_pc: PcFactory) -> None:
-    client, config = make_pc(close_grace_seconds=0.05)
+def test_closing_waits_for_transfers(make_config: Callable[..., AppConfig]) -> None:
+    config = _pc_config(make_config, close_grace_seconds=0.05)
+    app = create_app(config)
     config.tracker.active_requests = 1  # スマホがダウンロード中
 
-    client.post("/pc/api/closed?page=window-1", headers=LOCAL_ORIGIN)
+    async def run() -> None:
+        opened, close = asyncio.Event(), asyncio.Event()
+        window = asyncio.create_task(_window(app, opened, close))
+        await opened.wait()
+        close.set()
+        await window
+
+    asyncio.run(run())
     time.sleep(0.3)
     assert config.stop.reason is None
 
     config.tracker.active_requests = 0
     assert _wait_until(lambda: config.stop.reason is not None)
+
+
+def test_stop_ends_the_window_connection(make_config: Callable[..., AppConfig]) -> None:
+    config = _pc_config(make_config)
+    app = create_app(config)
+
+    async def run() -> None:
+        opened, close = asyncio.Event(), asyncio.Event()
+        window = asyncio.create_task(_window(app, opened, close))
+        await opened.wait()
+        config.stop.request("PCの画面から停止しました。")
+        # サーバーの終了を待たせないよう、こちらから接続を終える
+        await asyncio.wait_for(window, timeout=2)
+
+    asyncio.run(run())
+
+
+def test_window_connection_is_not_reachable_from_other_devices(make_config: Callable[..., AppConfig]) -> None:
+    app = create_app(_pc_config(make_config))
+    scope = _local_scope("/pc/api/events")
+    scope["client"], scope["server"] = ("192.168.1.20", 50000), ("192.168.1.50", PORT)
+    sent: list[dict] = []
+
+    async def receive() -> dict:
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(message: dict) -> None:
+        sent.append(message)
+
+    asyncio.run(app(scope, receive, send))
+    assert sent[0]["status"] == 404

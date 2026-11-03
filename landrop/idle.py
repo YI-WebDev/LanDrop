@@ -53,33 +53,6 @@ class StopRequest:
             self.reason = reason
 
 
-class PcPages:
-    """開いているPCの画面を、画面ごとのIDで把握する。
-
-    ブラウザは隠れた窓の定期処理を1分に1回程度まで間引くため、
-    それより長く連絡のない画面は閉じられたものとみなす。
-    """
-
-    ALIVE_SECONDS = 75
-
-    def __init__(self, clock: Callable[[], float] = time.monotonic) -> None:
-        self._clock = clock
-        self._last_seen: dict[str, float] = {}
-        self._closed: set[str] = set()
-
-    def seen(self, page_id: str) -> None:
-        if page_id and page_id not in self._closed:
-            self._last_seen[page_id] = self._clock()
-
-    def closed(self, page_id: str) -> None:
-        self._closed.add(page_id)
-        self._last_seen.pop(page_id, None)
-
-    def any_open(self) -> bool:
-        now = self._clock()
-        return any(now - seen < self.ALIVE_SECONDS for seen in self._last_seen.values())
-
-
 class ActivityMiddleware:
     """認証済みのリクエストの送受信を、操作があったとして記録する。"""
 

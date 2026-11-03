@@ -7,7 +7,7 @@ from collections.abc import Callable
 
 from fastapi.testclient import TestClient
 
-from landrop.idle import ActivityMiddleware, IdleTracker, PcPages, StopRequest
+from landrop.idle import ActivityMiddleware, IdleTracker, StopRequest
 from landrop.security import AUTHENTICATED_SCOPE_KEY
 from tests.conftest import FakeClock
 
@@ -147,23 +147,6 @@ def test_active_requests_are_counted_during_transfer() -> None:
 
     assert seen == [1]
     assert tracker.active_requests == 0
-
-
-def test_pc_pages_are_open_until_closed_or_silent() -> None:
-    clock = FakeClock()
-    pages = PcPages(clock=clock)
-    assert not pages.any_open()
-
-    pages.seen("a")
-    assert pages.any_open()
-    pages.closed("a")
-    # 閉じたあとに届いた、閉じる前の画面からの通信では開き直さない
-    pages.seen("a")
-    assert not pages.any_open()
-
-    pages.seen("b")
-    clock.advance(PcPages.ALIVE_SECONDS)
-    assert not pages.any_open()
 
 
 def test_stop_request_keeps_the_first_reason() -> None:
