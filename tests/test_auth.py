@@ -73,7 +73,7 @@ def test_wrong_cookie_is_rejected(anon_client: TestClient) -> None:
 
 
 def test_static_assets_are_public_but_contain_no_file_info(anon_client: TestClient) -> None:
-    response = anon_client.get("/static/style.css")
+    response = anon_client.get("/static/ui.css")
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("text/css")
     script = anon_client.get("/static/app.js")

@@ -5,13 +5,17 @@ from __future__ import annotations
 import argparse
 import logging
 import re
+import socket
+import threading
+import types
 
 import pytest
 import qrcode
 
 from landrop import cli
+from landrop.idle import IdleTracker, StopRequest
 from landrop.network import Interface
-from landrop.qr import render_qr
+from landrop.qr import render_qr, render_qr_svg
 
 
 @pytest.mark.parametrize(
@@ -167,3 +171,40 @@ def test_qr_rendering_matches_qr_matrix(color: bool) -> None:
 
     assert _decode(rendered)[: len(matrix)] == matrix
     assert ("\x1b[" in rendered) is color
+
+
+def test_qr_svg_draws_every_dark_module() -> None:
+    url = "http://192.168.1.5:8765/auth?t=" + "B" * 43
+    svg = render_qr_svg(url)
+
+    expected = qrcode.QRCode(error_correction=qrcode.constants.ERROR_CORRECT_L, border=2)
+    expected.add_data(url)
+    expected.make(fit=True)
+    matrix = expected.get_matrix()
+
+    assert f'viewBox="0 0 {len(matrix)} {len(matrix)}"' in svg
+    assert svg.count("h1v1h-1z") == sum(cell for row in matrix for cell in row)
+
+
+def test_no_open_option() -> None:
+    assert cli.build_parser().parse_args([]).no_open is False
+    assert cli.build_parser().parse_args(["--no-open"]).no_open is True
+
+
+def test_pc_screen_shares_the_socket_when_listening_on_loopback() -> None:
+    sock = socket.create_server(("127.0.0.1", 0))
+    try:
+        assert cli._bind_pc_socket("127.0.0.1", sock) is sock
+    finally:
+        sock.close()
+
+
+def test_watcher_stops_server_on_request(capsys: pytest.CaptureFixture[str]) -> None:
+    server = types.SimpleNamespace(should_exit=False)
+    stop = StopRequest()
+    stop.request("PCの画面から停止しました。")
+
+    cli._watch(server, IdleTracker(0), stop, threading.Event(), 30)  # type: ignore[arg-type]
+
+    assert server.should_exit is True
+    assert "PCの画面から停止しました。" in capsys.readouterr().out

@@ -7,8 +7,10 @@
 <meta name="theme-color" content="#f4f6f8" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#0d1418" media="(prefers-color-scheme: dark)">
 <title>LanDrop</title>
-<link rel="icon" href="data:,">
-<link rel="stylesheet" href="/static/style.css">
+<link rel="icon" href="/static/icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/static/ui.css">
+<link rel="stylesheet" href="/static/phone.css">
+<script src="/static/common.js" defer></script>
 <script src="/static/app.js" defer></script>
 </head>
 <body>
@@ -18,8 +20,8 @@
       <svg class="brand-mark" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2.5c3.6 4.3 6.5 7.8 6.5 11.4a6.5 6.5 0 0 1-13 0C5.5 10.3 8.4 6.8 12 2.5Z"/><path class="brand-arrow" d="M12 9.5v6.5m-3-3 3 3 3-3"/></svg>
       LanDrop
     </p>
-    <div class="connection" id="connection">
-      <span class="connection-dot" aria-hidden="true"></span>
+    <div class="chip" id="connection">
+      <span class="dot" aria-hidden="true"></span>
       <div class="connection-text">
         <p class="connection-name" id="pc-name">接続先を確認しています…</p>
         <p class="connection-address" id="address"></p>
@@ -33,7 +35,7 @@
     <div class="panel-head">
       <div>
         <h1>PCから受け取る</h1>
-        <p class="hint">PCの共有フォルダにあるファイルです。タップすると保存します。</p>
+        <p class="hint">PCから共有されたファイルです。タップすると保存します。一覧は自動で更新されます。</p>
       </div>
       <button type="button" class="btn btn-ghost btn-icon" id="refresh" aria-label="一覧を更新">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.3 5.7M20 4.5V11h-6.5"/></svg>
@@ -41,7 +43,7 @@
       </button>
     </div>
     <p class="status-line" id="files-status" role="status"></p>
-    <ul class="file-list" id="file-list"></ul>
+    <ul class="list" id="file-list"></ul>
   </section>
 
   <section class="panel" id="panel-send" role="tabpanel" aria-labelledby="tab-send" hidden>
@@ -52,7 +54,7 @@
       </div>
     </div>
     <p class="status-line" id="send-summary" role="status"></p>
-    <ul class="queue" id="queue"></ul>
+    <ul class="list" id="queue"></ul>
     <div class="send-actions">
       <input type="file" id="file-input" class="visually-hidden" multiple>
       <label class="btn btn-primary btn-block" for="file-input">
@@ -61,7 +63,7 @@
       </label>
       <button type="button" class="btn btn-ghost btn-block" id="clear-done" hidden>完了したものを一覧から消す</button>
     </div>
-    <p class="hint small">送信中はこの画面を開いたままにしてください。送ったファイルは、この画面の一覧には表示されません。</p>
+    <p class="hint send-note">送信中はこの画面を開いたままにしてください。送ったファイルは、PCのLanDropの画面の「届いたファイル」で確認できます。</p>
   </section>
 
   <p class="notice">通信は暗号化されていません。自宅など信頼できるネットワークでだけ使ってください。</p>

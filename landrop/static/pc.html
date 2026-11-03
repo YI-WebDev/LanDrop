@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#f4f6f8" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0d1418" media="(prefers-color-scheme: dark)">
+<title>LanDrop</title>
+<link rel="icon" href="/static/icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/static/ui.css">
+<link rel="stylesheet" href="/static/pc.css">
+<script src="/static/common.js" defer></script>
+<script src="/static/pc.js" defer></script>
+</head>
+<body>
+<header class="appbar">
+  <p class="brand">
+    <svg class="brand-mark" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2.5c3.6 4.3 6.5 7.8 6.5 11.4a6.5 6.5 0 0 1-13 0C5.5 10.3 8.4 6.8 12 2.5Z"/><path class="brand-arrow" d="M12 9.5v6.5m-3-3 3 3 3-3"/></svg>
+    LanDrop
+  </p>
+  <div class="chip" id="connection">
+    <span class="dot" aria-hidden="true"></span>
+    <span class="appbar-pc" id="pc-name">起動しています…</span>
+    <span class="appbar-address" id="address"></span>
+  </div>
+  <p class="appbar-timer" id="timer" role="status"></p>
+  <button type="button" class="btn btn-ghost btn-sm" id="stop">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v8M6.3 6.3a8 8 0 1 0 11.4 0"/></svg>
+    停止
+  </button>
+</header>
+
+<div class="layout">
+  <aside class="sidebar">
+    <section class="card connect-card" aria-labelledby="connect-title">
+      <h2 id="connect-title">スマホで接続</h2>
+      <p class="hint">スマホのカメラで読み取ると、ブラウザでLanDropが開きます。アプリのインストールは要りません。</p>
+      <div class="qr"><img id="qr" src="/pc/qr.svg" alt="スマホで接続するためのQRコード" width="232" height="232"></div>
+      <button type="button" class="btn btn-ghost btn-sm" id="copy-url">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 8.5h10.5V20H9zM15 8.5V4H4.5v11.5H9"/></svg>
+        URLをコピー
+      </button>
+      <p class="fine-print">このQRコードを知っている人は誰でも接続できます。他の人に見せないでください。</p>
+    </section>
+
+    <section class="card folders-card" aria-labelledby="folders-title">
+      <h2 id="folders-title">フォルダ</h2>
+      <div class="folder">
+        <div class="folder-text">
+          <p class="folder-label">共有フォルダ</p>
+          <p class="folder-path mono" id="share-dir"></p>
+        </div>
+        <button type="button" class="btn btn-quiet btn-sm" data-open-folder="share">開く</button>
+      </div>
+      <div class="folder">
+        <div class="folder-text">
+          <p class="folder-label">受信フォルダ</p>
+          <p class="folder-path mono" id="received-dir"></p>
+        </div>
+        <button type="button" class="btn btn-quiet btn-sm" data-open-folder="received">開く</button>
+      </div>
+    </section>
+
+    <p class="notice" data-tone="warning">通信は暗号化されません（HTTP）。自宅など信頼できるネットワークでだけ使ってください。</p>
+  </aside>
+
+  <main class="content">
+    <div class="segmented" role="tablist" aria-label="切り替え">
+      <button type="button" role="tab" id="tab-share" aria-controls="panel-share" aria-selected="true">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V4m-5.5 5.5L12 4l5.5 5.5M5 20h14"/></svg>
+        スマホへ送る
+        <span class="count" id="share-count"></span>
+      </button>
+      <button type="button" role="tab" id="tab-received" aria-controls="panel-received" aria-selected="false">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 13h5l1.5 2.5h5L16 13h5M5.5 5h13L21 13v5.5a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 18.5V13Z"/></svg>
+        届いたファイル
+        <span class="count" id="received-count"></span>
+        <span class="badge" data-tone="primary" id="received-busy" hidden>受信中</span>
+        <span class="new-dot" id="received-new" hidden><span class="visually-hidden">新しいファイルあり</span></span>
+      </button>
+    </div>
+
+    <section class="panel" id="panel-share" role="tabpanel" aria-labelledby="tab-share">
+      <label class="dropzone" id="dropzone" for="share-input">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V4m-5.5 5.5L12 4l5.5 5.5M5 20h14"/></svg>
+        <strong>ここにファイルをドロップ</strong>
+        <span class="hint">共有フォルダにコピーされ、スマホの「受け取る」に表示されます。</span>
+        <span class="btn btn-primary">ファイルを選ぶ</span>
+      </label>
+      <input type="file" id="share-input" class="visually-hidden" multiple>
+      <ul class="list queue" id="share-queue"></ul>
+
+      <div class="section-head">
+        <h2>共有中のファイル</h2>
+        <p class="status-line" id="share-status" role="status"></p>
+      </div>
+      <ul class="list" id="share-list"></ul>
+    </section>
+
+    <section class="panel" id="panel-received" role="tabpanel" aria-labelledby="tab-received" hidden>
+      <ul class="list queue" id="incoming"></ul>
+      <div class="section-head">
+        <h2>スマホから届いたファイル</h2>
+        <div class="view-toggle" role="group" aria-label="表示の切り替え">
+          <button type="button" data-view="grid" aria-pressed="true">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h7v7H4zM13 4h7v7h-7zM4 13h7v7H4zM13 13h7v7h-7z"/></svg>
+            <span class="visually-hidden">大きく表示</span>
+          </button>
+          <button type="button" data-view="list" aria-pressed="false">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6h11M9 12h11M9 18h11M4.5 6h.01M4.5 12h.01M4.5 18h.01"/></svg>
+            <span class="visually-hidden">一覧で表示</span>
+          </button>
+        </div>
+      </div>
+      <p class="status-line" id="received-status" role="status"></p>
+      <ul class="gallery" id="received-list" data-view="grid"></ul>
+    </section>
+  </main>
+</div>
+
+<div class="drop-overlay" id="drop-overlay" hidden>
+  <div class="drop-overlay-inner">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V4m-5.5 5.5L12 4l5.5 5.5M5 20h14"/></svg>
+    ドロップしてスマホへ送る
+  </div>
+</div>
+
+<dialog class="viewer" id="viewer" aria-labelledby="viewer-name">
+  <div class="viewer-media" id="viewer-media"></div>
+  <div class="viewer-bar">
+    <div class="viewer-text">
+      <p class="file-name" id="viewer-name"></p>
+      <p class="file-meta" id="viewer-meta"></p>
+    </div>
+    <button type="button" class="btn btn-ghost btn-sm btn-icon" id="viewer-prev" aria-label="前のファイル">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14.5 5.5 8 12l6.5 6.5"/></svg>
+    </button>
+    <button type="button" class="btn btn-ghost btn-sm btn-icon" id="viewer-next" aria-label="次のファイル">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9.5 5.5 16 12l-6.5 6.5"/></svg>
+    </button>
+    <button type="button" class="btn btn-ghost btn-sm" id="viewer-reveal">フォルダで表示</button>
+    <button type="button" class="btn btn-primary btn-sm" id="viewer-close">閉じる</button>
+  </div>
+</dialog>
+
+<dialog class="confirm" id="confirm-stop" aria-labelledby="confirm-title">
+  <h2 id="confirm-title">LanDrop を停止しますか？</h2>
+  <p id="confirm-text"></p>
+  <div class="dialog-actions">
+    <button type="button" class="btn btn-ghost" id="confirm-cancel">キャンセル</button>
+    <button type="button" class="btn btn-danger" id="confirm-stop-button">停止する</button>
+  </div>
+</dialog>
+
+<div class="toast" id="toast" role="status" hidden></div>
+
+<div class="overlay" id="stopped" hidden>
+  <div class="message-card" role="alertdialog" aria-labelledby="stopped-title">
+    <p class="brand">LanDrop</p>
+    <h1 id="stopped-title">停止しました</h1>
+    <p id="stopped-text">この画面は閉じてかまいません。</p>
+  </div>
+</div>
+</body>
+</html>

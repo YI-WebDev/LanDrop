@@ -280,3 +280,33 @@ def test_server_stop_during_upload_removes_part_file(received_dir: Path) -> None
 
     asyncio.run(run())
     assert _files(received_dir) == []
+
+
+def test_progress_is_visible_while_receiving(received_dir: Path) -> None:
+    receiver = Receiver(received_dir, max_size=1000)
+    observed: list[list[tuple[str, int, int]]] = []
+
+    async def chunks() -> AsyncIterator[bytes]:
+        for _ in range(3):
+            yield b"x" * 10
+            observed.append([(i.name, i.size, i.received) for i in receiver.in_progress])
+
+    asyncio.run(receiver.receive("動画.mp4", 30, chunks()))
+
+    assert observed == [[("動画.mp4", 30, 10)], [("動画.mp4", 30, 20)], [("動画.mp4", 30, 30)]]
+    assert receiver.in_progress == []
+
+
+def test_part_file_is_hidden_from_listings(received_dir: Path) -> None:
+    receiver = Receiver(received_dir, max_size=1000)
+    listed: list[list[str]] = []
+
+    async def chunks() -> AsyncIterator[bytes]:
+        listed.append([f.name for f in storage.list_files(received_dir)])
+        yield b"x"
+
+    asyncio.run(receiver.receive("a.txt", 1, chunks()))
+
+    # 受信中の .part は先頭が「.」なので、一覧に出ない
+    assert listed == [[]]
+    assert [f.name for f in storage.list_files(received_dir)] == ["a.txt"]

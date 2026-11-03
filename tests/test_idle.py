@@ -7,7 +7,7 @@ from collections.abc import Callable
 
 from fastapi.testclient import TestClient
 
-from landrop.idle import ActivityMiddleware, IdleTracker
+from landrop.idle import ActivityMiddleware, IdleTracker, PcPages, StopRequest
 from landrop.security import AUTHENTICATED_SCOPE_KEY
 from tests.conftest import FakeClock
 
@@ -100,10 +100,75 @@ def test_unauthenticated_requests_do_not_keep_server_alive(make_client: Callable
     anon = make_client(authenticated=False, tracker=tracker)
     clock.advance(61)
 
-    for path in ("/", "/api/files", "/auth?t=wrong", "/static/style.css"):
+    for path in ("/", "/api/files", "/auth?t=wrong", "/static/ui.css"):
         anon.get(path)
     assert tracker.is_expired()
 
     authed = make_client(tracker=tracker)
     authed.get("/api/files")
     assert not tracker.is_expired()
+
+
+def test_auto_refresh_does_not_count_as_activity(make_client: Callable[..., TestClient]) -> None:
+    clock = FakeClock()
+    tracker = IdleTracker(60, clock=clock)
+    client = make_client(tracker=tracker)
+    clock.advance(61)
+
+    # 画面を開いたままにしているだけの自動更新では、自動停止を妨げない
+    client.get("/api/files", headers={"X-LanDrop-Auto": "1"})
+    assert tracker.is_expired()
+
+    client.get("/api/files")
+    assert not tracker.is_expired()
+
+
+def test_remaining_seconds() -> None:
+    clock = FakeClock()
+    tracker = IdleTracker(60, clock=clock)
+
+    clock.advance(20)
+    assert tracker.remaining_seconds() == 40
+    assert IdleTracker(0, clock=clock).remaining_seconds() is None
+
+
+def test_active_requests_are_counted_during_transfer() -> None:
+    tracker = IdleTracker(60)
+    seen: list[int] = []
+
+    async def app(scope, receive, send) -> None:  # type: ignore[no-untyped-def]
+        seen.append(tracker.active_requests)
+
+    async def noop(*_: object) -> None:
+        pass
+
+    scope = {"type": "http", "path": "/api/files/a", AUTHENTICATED_SCOPE_KEY: True}
+    asyncio.run(ActivityMiddleware(app, tracker)(scope, noop, noop))
+
+    assert seen == [1]
+    assert tracker.active_requests == 0
+
+
+def test_pc_pages_are_open_until_closed_or_silent() -> None:
+    clock = FakeClock()
+    pages = PcPages(clock=clock)
+    assert not pages.any_open()
+
+    pages.seen("a")
+    assert pages.any_open()
+    pages.closed("a")
+    # 閉じたあとに届いた、閉じる前の画面からの通信では開き直さない
+    pages.seen("a")
+    assert not pages.any_open()
+
+    pages.seen("b")
+    clock.advance(PcPages.ALIVE_SECONDS)
+    assert not pages.any_open()
+
+
+def test_stop_request_keeps_the_first_reason() -> None:
+    stop = StopRequest()
+    stop.request("1つ目")
+    stop.request("2つ目")
+
+    assert stop.reason == "1つ目"

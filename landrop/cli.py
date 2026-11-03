@@ -15,17 +15,20 @@ from pathlib import Path
 
 import uvicorn
 
-from landrop import __version__, network
+from landrop import __version__, desktop, network
 from landrop.app import AppConfig, create_app
-from landrop.idle import IdleTracker
+from landrop.idle import IdleTracker, StopRequest
 from landrop.qr import render_qr
+from landrop.security import PC_AUTH_PATH
 
 DEFAULT_PORT = 8765
 DEFAULT_SHARE = Path.home() / "LanDrop" / "share"
 DEFAULT_RECEIVED = Path.home() / "LanDrop" / "received"
 DEFAULT_MAX_SIZE = "10GB"
 DEFAULT_TIMEOUT_MINUTES = 30.0
-_IDLE_CHECK_SECONDS = 5
+# 画面のないアプリとして起動したときに、ターミナルへの表示の代わりに書き出すファイル
+LOG_FILE = Path.home() / "LanDrop" / "LanDrop.log"
+_WATCH_SECONDS = 0.5
 _SIZE_UNITS = {"": 1, "K": 1024, "M": 1024**2, "G": 1024**3, "T": 1024**4}
 
 
@@ -66,7 +69,7 @@ def _minutes(text: str) -> float:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="python -m landrop",
+        prog=_command(),
         description="同じLAN内のPCとスマホの間で、ブラウザだけでファイルを送受信します。",
         add_help=False,
     )
@@ -95,20 +98,44 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="MINUTES",
         help="無操作が続いたら自動停止するまでの分数。0で自動停止しない（既定: 30）",
     )
+    parser.add_argument("--no-open", action="store_true", help="起動時にPCの画面を開かない")
     parser.add_argument(
         "--version", action="version", version=f"LanDrop {__version__}", help="バージョンを表示して終了する"
     )
     return parser
 
 
+def _command() -> str:
+    """案内に表示する起動コマンド。"""
+    if getattr(sys, "frozen", False):
+        return "LanDrop.exe" if os.name == "nt" else "LanDrop"
+    return "python -m landrop"
+
+
 def main(argv: list[str] | None = None) -> int:
     _prepare_console()
     args = build_parser().parse_args(argv)
     try:
-        return _run(args)
+        code = _run(args)
     except KeyboardInterrupt:
         print("\n中止しました。")
         return 130
+    if code != 0:
+        _keep_error_visible()
+    return code
+
+
+def _keep_error_visible() -> None:
+    """ダブルクリックで起動したアプリが、エラーを読む前に閉じてしまわないようにする。"""
+    if not getattr(sys, "frozen", False):
+        return
+    if _stdin_is_tty():
+        try:
+            input("\nEnterキーを押すと閉じます。")
+        except EOFError:
+            pass
+    else:
+        desktop.alert("LanDrop を起動できませんでした", f"詳しくは {LOG_FILE} を確認してください。")
 
 
 def _run(args: argparse.Namespace) -> int:
@@ -141,6 +168,7 @@ def _run(args: argparse.Namespace) -> int:
         print(f"{ip} で待ち受けできませんでした: {e}")
         print("このPCのLANのIPアドレスか確認し、--ip で指定し直してください。")
         return 1
+    pc_sock = _bind_pc_socket(ip, sock)
 
     tracker = IdleTracker(args.timeout * 60)
     config = AppConfig(
@@ -153,7 +181,9 @@ def _run(args: argparse.Namespace) -> int:
         tracker=tracker,
     )
     app = create_app(config)
-    _print_banner(config, args.timeout, requested_port, _profile_warnings(ip, interfaces, detailed))
+    pc_url = f"http://127.0.0.1:{pc_sock.getsockname()[1]}{PC_AUTH_PATH}?t={config.pc_token}" if pc_sock else None
+    warnings = _profile_warnings(ip, interfaces, detailed)
+    _print_banner(config, args.timeout, requested_port, warnings, pc_url, args.no_open)
 
     uvicorn_config = uvicorn.Config(
         app,
@@ -169,20 +199,33 @@ def _run(args: argparse.Namespace) -> int:
     # Config の作成時にUvicornがログを設定し直すため、フィルターはその後で付ける
     logging.getLogger("uvicorn.error").addFilter(_InvalidRequestNotice())
     server = uvicorn.Server(uvicorn_config)
-    stop_watching = threading.Event()
-    if args.timeout > 0:
-        threading.Thread(
-            target=_watch_idle, args=(server, tracker, stop_watching, args.timeout), daemon=True
-        ).start()
+    finished = threading.Event()
+    threading.Thread(target=_watch, args=(server, tracker, config.stop, finished, args.timeout), daemon=True).start()
+    if pc_url and not args.no_open:
+        # ソケットはすでに待ち受けているので、サーバーの準備より先に開いてもつながる
+        desktop.open_app_window(pc_url)
+    sockets = [sock] if pc_sock in (None, sock) else [sock, pc_sock]
     try:
-        server.run(sockets=[sock])
+        server.run(sockets=sockets)
     except KeyboardInterrupt:
         pass
     finally:
-        stop_watching.set()
-        sock.close()
+        finished.set()
+        for s in sockets:
+            s.close()
     print("LanDrop を停止しました。")
     return 0
+
+
+def _bind_pc_socket(ip: str, lan_sock: socket.socket) -> socket.socket | None:
+    """PCの画面用に、このPCからだけ届く 127.0.0.1 で待ち受けるソケットを用意する。"""
+    if ipaddress.IPv4Address(ip).is_loopback:
+        return lan_sock
+    try:
+        return network.bind_socket("127.0.0.1", lan_sock.getsockname()[1], search=True)
+    except OSError as e:
+        print(f"[注意] PCの画面を用意できませんでした（{e}）。スマホとの送受信はこのまま使えます。")
+        return None
 
 
 def _validate_ip(text: str, interfaces: list[network.Interface]) -> str | None:
@@ -224,8 +267,8 @@ def _select_ip(interfaces: list[network.Interface], detailed: bool) -> str | Non
         reason = network.exclusion_reason(iface)
         note = f"  ※{reason}" if reason else ""
         print(f"  {number}) {iface.ip:<15}  {iface.label}{note}")
-    if not sys.stdin.isatty():
-        print("--ip で指定して起動し直してください（例: python -m landrop --ip 192.168.1.10）。")
+    if not _stdin_is_tty():
+        print(f"--ip で指定して起動し直してください（例: {_command()} --ip 192.168.1.10）。")
         return None
     while True:
         try:
@@ -257,7 +300,9 @@ def _profile_warnings(ip: str, interfaces: list[network.Interface], detailed: bo
     ]
 
 
-def _print_banner(config: AppConfig, timeout: float, requested_port: int, warnings: list[str]) -> None:
+def _print_banner(
+    config: AppConfig, timeout: float, requested_port: int, warnings: list[str], pc_url: str | None, no_open: bool
+) -> None:
     timeout_text = f"{timeout:g}分間操作がなければ停止" if timeout > 0 else "しない"
     rows = [
         ("PC名", config.pc_name),
@@ -286,6 +331,13 @@ def _print_banner(config: AppConfig, timeout: float, requested_port: int, warnin
     print("  （このURLを知っている人は誰でも接続できます。他の人に見せないでください）")
     print(f"  {config.access_url}")
     print()
+    if pc_url:
+        if no_open:
+            print("  PCの画面を使うときは、このPCのブラウザで次のURLを開いてください。")
+        else:
+            print("  PCの画面を開きました。開かないときは、このPCのブラウザで次のURLを開いてください。")
+        print(f"  {pc_url}")
+        print()
 
     notices = [
         [
@@ -306,10 +358,10 @@ def _print_banner(config: AppConfig, timeout: float, requested_port: int, warnin
     print("   1. スマホとPCが同じWi-Fi（同じルーター）につながっているか確認する")
     print("   2. ゲストWi-Fiや端末どうしの通信を遮断する設定、スマホのVPNがオフか確認する")
     print("   3. Windowsのファイアウォールで、Python の「プライベート ネットワーク」での通信を許可する")
-    print("   4. 別のアドレスで起動し直す: python -m landrop --ip <このPCのIPアドレス>")
+    print(f"   4. 別のアドレスで起動し直す: {_command()} --ip <このPCのIPアドレス>")
     print("   詳しくは README.md の「接続できないとき」を参照してください。")
     print()
-    print("  Ctrl+C で停止します。", flush=True)
+    print("  Ctrl+C で停止します（PCの画面を閉じても停止します）。", flush=True)
 
 
 class _InvalidRequestNotice(logging.Filter):
@@ -337,12 +389,20 @@ class _InvalidRequestNotice(logging.Filter):
         return False
 
 
-def _watch_idle(server: uvicorn.Server, tracker: IdleTracker, stop: threading.Event, minutes: float) -> None:
-    while not stop.wait(_IDLE_CHECK_SECONDS):
-        if tracker.is_expired():
-            print(f"\n{minutes:g}分間操作がなかったため、自動停止します。", flush=True)
-            server.should_exit = True
-            return
+def _watch(
+    server: uvicorn.Server, tracker: IdleTracker, stop: StopRequest, finished: threading.Event, minutes: float
+) -> None:
+    """無操作による自動停止と、PCの画面からの停止の依頼を見張る。"""
+    while not finished.wait(_WATCH_SECONDS):
+        if stop.reason:
+            message = stop.reason
+        elif tracker.is_expired():
+            message = f"{minutes:g}分間操作がなかったため、自動停止します。"
+        else:
+            continue
+        print(f"\n{message}", flush=True)
+        server.should_exit = True
+        return
 
 
 def _pad(text: str, width: int) -> str:
@@ -352,12 +412,20 @@ def _pad(text: str, width: int) -> str:
 
 
 def _prepare_console() -> None:
+    if sys.stdout is None:
+        # 画面のないアプリ（macOSの .app）として起動したときは、表示をファイルに残す
+        LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        sys.stdout = sys.stderr = open(LOG_FILE, "w", encoding="utf-8", buffering=1)  # noqa: SIM115
     # 表示できない文字（フォルダ名の絵文字など）があっても起動を止めない
     for stream in (sys.stdout, sys.stderr):
         try:
             stream.reconfigure(errors="replace")  # type: ignore[union-attr]
         except (AttributeError, ValueError):
             pass
+
+
+def _stdin_is_tty() -> bool:
+    return sys.stdin is not None and sys.stdin.isatty()
 
 
 def _can_print(text: str) -> bool:

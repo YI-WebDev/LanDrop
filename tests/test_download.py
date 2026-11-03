@@ -90,14 +90,14 @@ def test_path_traversal_is_rejected(client: TestClient, share_dir: Path, path: s
     assert b"TOP-SECRET" not in response.content
 
 
-def test_find_shared_file_rejects_paths(share_dir: Path) -> None:
+def test_find_file_rejects_paths(share_dir: Path) -> None:
     secret = share_dir.parent / "secret.txt"
     secret.write_bytes(b"x")
     (share_dir / "ok.txt").write_bytes(b"x")
 
-    assert storage.find_shared_file(share_dir, "ok.txt") == share_dir / "ok.txt"
+    assert storage.find_file(share_dir, "ok.txt") == share_dir / "ok.txt"
     for name in ("../secret.txt", "..\\secret.txt", str(secret), "", ".", "..", "ok.txt\x00"):
-        assert storage.find_shared_file(share_dir, name) is None
+        assert storage.find_file(share_dir, name) is None
 
 
 def _symlink_or_skip(link: Path, target: Path) -> None:

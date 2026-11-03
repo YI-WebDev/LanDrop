@@ -1,4 +1,4 @@
-"""共有フォルダの一覧とダウンロード対象の解決、受信ファイルの保存。"""
+"""フォルダの一覧とダウンロード対象の解決、受信ファイルの保存。"""
 
 from __future__ import annotations
 
@@ -20,27 +20,36 @@ _MAX_NUMBERED_NAMES = 10_000
 
 
 @dataclass(frozen=True)
-class SharedFile:
+class FileInfo:
     name: str
     size: int
     modified: float
 
 
-def list_shared_files(share_dir: Path) -> list[SharedFile]:
-    """共有フォルダ直下のファイルを新しい順に返す。"""
+@dataclass
+class Incoming:
+    """受信中のファイル。PCの画面に進み具合を表示する。"""
+
+    name: str
+    size: int
+    received: int = 0
+
+
+def list_files(folder: Path) -> list[FileInfo]:
+    """フォルダ直下のファイルを新しい順に返す。"""
     files = []
-    with os.scandir(share_dir) as entries:
+    with os.scandir(folder) as entries:
         for entry in entries:
             if not _is_listable(entry):
                 continue
             st = entry.stat(follow_symlinks=False)
             name = unicodedata.normalize("NFC", entry.name)
-            files.append(SharedFile(name=name, size=st.st_size, modified=st.st_mtime))
+            files.append(FileInfo(name=name, size=st.st_size, modified=st.st_mtime))
     files.sort(key=lambda f: (-f.modified, f.name))
     return files
 
 
-def find_shared_file(share_dir: Path, name: str) -> Path | None:
+def find_file(folder: Path, name: str) -> Path | None:
     """一覧に表示されるファイルの中から、名前が一致するものを返す。
 
     パス要素を含む名前は受け付けず、ディレクトリの実際の中身と照合するため、
@@ -49,13 +58,13 @@ def find_shared_file(share_dir: Path, name: str) -> Path | None:
     if not name or _has_path_element(name):
         return None
     target = unicodedata.normalize("NFC", name)
-    root = share_dir.resolve()
-    with os.scandir(share_dir) as entries:
+    root = folder.resolve()
+    with os.scandir(folder) as entries:
         for entry in entries:
             if unicodedata.normalize("NFC", entry.name) != target or not _is_listable(entry):
                 continue
             path = Path(entry.path)
-            # 念のため、解決後のパスが共有フォルダ直下にあることを確認する
+            # 念のため、解決後のパスがフォルダ直下にあることを確認する
             if path.resolve().parent != root:
                 return None
             return path
@@ -93,16 +102,17 @@ class UploadError(Exception):
 class Receiver:
     """受信データを .part ファイルへ少しずつ書き込み、完了後に正式な名前へ変更する。"""
 
-    def __init__(self, received_dir: Path, max_size: int) -> None:
-        self.received_dir = received_dir
+    def __init__(self, folder: Path, max_size: int) -> None:
+        self.folder = folder
         self.max_size = max_size
+        self.in_progress: list[Incoming] = []
         # 同時に受信中のファイルが使う予定の容量
         self._reserved_bytes = 0
 
     def check_capacity(self, size: int) -> None:
         if size > self.max_size:
             raise UploadError(413, "ファイルサイズが上限を超えています。")
-        free = shutil.disk_usage(self.received_dir).free
+        free = shutil.disk_usage(self.folder).free
         if free - self._reserved_bytes - size < DISK_RESERVE_BYTES:
             raise UploadError(507, "PCの保存先の空き容量が不足しています。")
 
@@ -110,10 +120,13 @@ class Receiver:
         """データを受信して保存し、保存したファイル名を返す。"""
         safe_name = sanitize_filename(name)
         self.check_capacity(size)
-        part = self._inside(self.received_dir / f"{safe_name}.landrop-{secrets.token_hex(8)}.part")
+        # 先頭を「.」にして、受信中のファイルが一覧に出ないようにする
+        part = self._inside(self.folder / f".{safe_name}.landrop-{secrets.token_hex(8)}.part")
         # 作成に失敗したときに他人の .part を消さないよう、try の外で排他的に作成する
         f = part.open("xb", buffering=_WRITE_BUFFER_BYTES)
         self._reserved_bytes += size
+        incoming = Incoming(safe_name, size)
+        self.in_progress.append(incoming)
         try:
             written = 0
             with f:
@@ -122,18 +135,20 @@ class Receiver:
                     if written > size:
                         raise UploadError(400, "受信したデータが申告されたサイズより大きいです。")
                     f.write(chunk)
+                    incoming.received = written
             if written != size:
                 raise UploadError(400, "受信したデータが途中で終わりました。")
             return self._commit(part, safe_name).name
         finally:
             # 切断・エラー・停止のいずれでも .part を残さない（正常完了時は移動済み）
             self._reserved_bytes -= size
+            self.in_progress.remove(incoming)
             part.unlink(missing_ok=True)
 
     def _commit(self, part: Path, name: str) -> Path:
         """同名ファイルを上書きしないよう、空いている名前を排他的に確保してから移動する。"""
         for number in range(_MAX_NUMBERED_NAMES):
-            candidate = self._inside(self.received_dir / numbered_name(name, number))
+            candidate = self._inside(self.folder / numbered_name(name, number))
             try:
                 # "x" は既に存在すれば失敗するため、同時アップロードでも同じ名前を取り合わない
                 candidate.open("xb").close()
@@ -152,6 +167,6 @@ class Receiver:
         raise UploadError(409, "同じ名前のファイルが多すぎるため保存できません。")
 
     def _inside(self, path: Path) -> Path:
-        if path.resolve().parent != self.received_dir.resolve():
+        if path.resolve().parent != self.folder.resolve():
             raise UploadError(400, "ファイル名が不正です。")
         return path

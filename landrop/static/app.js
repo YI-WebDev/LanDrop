@@ -1,4 +1,4 @@
-// LanDrop スマホ側の画面の動作（ビルド工程なしの素のJavaScript）
+// LanDrop スマホ側の画面の動作（ビルド工程なしの素のJavaScript。先に common.js を読み込む）
 "use strict";
 
 const STATUS_LABELS = {
@@ -8,75 +8,36 @@ const STATUS_LABELS = {
   failed: "失敗",
 };
 
+// デザインシステムのバッジの色（ui.css の data-tone）
+const STATUS_TONES = {
+  uploading: "primary",
+  done: "success",
+  failed: "danger",
+};
+
+// 一覧の自動更新の間隔。自動更新は「操作」に数えないので、開いたままでも自動停止は効く
+const AUTO_REFRESH_MS = 4000;
+
 const state = {
   maxSize: Infinity,
   queue: [],
   running: false,
   nextId: 1,
+  loadingFiles: false,
+  filesSignature: "",
 };
 
-const $ = (id) => document.getElementById(id);
+// 表示用の整形と要素の作成は common.js を使う
 
 class SessionExpired extends Error {}
 
-// ---------- 表示用の整形 ----------
-
-function formatSize(bytes) {
-  if (!Number.isFinite(bytes)) return "—";
-  if (bytes < 1024) return `${bytes} B`;
-  const units = ["KB", "MB", "GB", "TB"];
-  let value = bytes;
-  let unit = "B";
-  for (const next of units) {
-    if (value < 1024) break;
-    value /= 1024;
-    unit = next;
-  }
-  const digits = value < 10 ? 1 : 0;
-  return `${value.toFixed(digits).replace(/\.0$/, "")} ${unit}`;
-}
-
-function formatDate(seconds) {
-  return new Date(seconds * 1000).toLocaleString("ja-JP", {
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
-}
-
-function extensionLabel(name) {
-  const dot = name.lastIndexOf(".");
-  if (dot <= 0 || dot === name.length - 1) return "FILE";
-  return name.slice(dot + 1, dot + 5).toUpperCase();
-}
-
-function el(tag, className, text) {
-  const node = document.createElement(tag);
-  if (className) node.className = className;
-  // ファイル名は必ず textContent で入れる（HTMLとして解釈させない）
-  if (text !== undefined) node.textContent = text;
-  return node;
-}
-
-function icon(path) {
-  const ns = "http://www.w3.org/2000/svg";
-  const svg = document.createElementNS(ns, "svg");
-  svg.setAttribute("viewBox", "0 0 24 24");
-  svg.setAttribute("aria-hidden", "true");
-  const p = document.createElementNS(ns, "path");
-  p.setAttribute("d", path);
-  svg.append(p);
-  return svg;
-}
-
 // ---------- サーバーとの通信 ----------
 
-async function getJSON(path) {
+async function getJSON(path, auto = false) {
   let response;
   try {
-    response = await fetch(path, { cache: "no-store", credentials: "same-origin" });
+    const headers = auto ? { "X-LanDrop-Auto": "1" } : {};
+    response = await fetch(path, { cache: "no-store", credentials: "same-origin", headers });
   } catch {
     setOnline(false);
     throw new Error("PCに接続できません。LanDropが起動しているか、同じWi-Fiにつながっているか確認してください。");
@@ -112,15 +73,25 @@ async function loadInfo() {
 
 // ---------- PC → スマホ ----------
 
-async function loadFiles() {
+async function loadFiles({ auto = false } = {}) {
+  if (state.loadingFiles) return;
+  state.loadingFiles = true;
   const status = $("files-status");
   const button = $("refresh");
-  button.disabled = true;
-  status.classList.remove("is-error");
-  status.textContent = "読み込んでいます…";
+  if (!auto) {
+    button.disabled = true;
+    status.classList.remove("is-error");
+    status.textContent = "読み込んでいます…";
+  }
   try {
-    const { files } = await getJSON("/api/files");
-    renderFiles(files);
+    const { files } = await getJSON("/api/files", auto);
+    const signature = JSON.stringify(files);
+    // 自動更新では、変化がなければ描き直さない（スクロール位置や押しかけた操作を保つ）
+    if (!auto || signature !== state.filesSignature || status.classList.contains("is-error")) {
+      status.classList.remove("is-error");
+      state.filesSignature = signature;
+      renderFiles(files);
+    }
   } catch (error) {
     if (error instanceof SessionExpired) {
       showExpired();
@@ -130,8 +101,15 @@ async function loadFiles() {
       status.textContent = error.message;
     }
   } finally {
+    state.loadingFiles = false;
     button.disabled = false;
   }
+}
+
+function autoRefresh() {
+  if (document.visibilityState !== "visible") return;
+  if ($("panel-receive").hidden || !$("expired").hidden) return;
+  loadFiles({ auto: true });
 }
 
 function renderFiles(files) {
@@ -143,9 +121,9 @@ function renderFiles(files) {
     const empty = el("li", "empty");
     empty.append(el("strong", "", "共有するファイルがありません"));
     empty.append(
-      // --share で場所を変えられるため、フォルダ名ではなくターミナルの表示を案内する
+      // --share で場所を変えられるため、フォルダ名ではなくPCの画面での操作を案内する
       document.createTextNode(
-        "PCのターミナルに「共有フォルダ」として表示されているフォルダにファイルを入れてから、「更新」を押してください。"
+        "PCのLanDropの画面にファイルをドロップすると、ここに表示されます。"
       )
     );
     list.append(empty);
@@ -158,7 +136,7 @@ function renderFiles(files) {
     link.href = `/api/files/${encodeURIComponent(file.name)}`;
     link.setAttribute("download", "");
     link.setAttribute("aria-label", `${file.name} を保存`);
-    link.append(el("span", "file-type", extensionLabel(file.name)));
+    link.append(el("span", "tile", extensionLabel(file.name)));
     const main = el("span", "file-main");
     main.append(el("span", "file-name", file.name));
     main.append(el("span", "file-meta", `${formatSize(file.size)} ・ ${formatDate(file.modified)}`));
@@ -194,12 +172,12 @@ function createItemNode(item) {
   const root = el("li", "item");
   const main = el("div");
   const head = el("div", "item-head");
-  const status = el("span", "status");
+  const status = el("span", "badge");
   head.append(status);
   const name = el("p", "item-name", item.file.name);
   const meta = el("p", "item-meta");
   main.append(head, name, meta);
-  const retry = el("button", "btn btn-small btn-danger", "再送");
+  const retry = el("button", "btn btn-sm btn-danger", "再送");
   retry.type = "button";
   retry.setAttribute("aria-label", `${item.file.name} を再送`);
   retry.addEventListener("click", () => {
@@ -222,6 +200,8 @@ function renderItem(item) {
   const size = item.file.size;
   root.dataset.status = item.status;
   status.textContent = STATUS_LABELS[item.status];
+  if (STATUS_TONES[item.status]) status.dataset.tone = STATUS_TONES[item.status];
+  else delete status.dataset.tone;
   retry.hidden = !(item.status === "failed" && item.retryable);
   let ratio = 0;
   if (item.status === "uploading") {
@@ -350,7 +330,7 @@ function selectTab(name) {
 document.addEventListener("DOMContentLoaded", () => {
   $("tab-receive").addEventListener("click", () => selectTab("receive"));
   $("tab-send").addEventListener("click", () => selectTab("send"));
-  $("refresh").addEventListener("click", loadFiles);
+  $("refresh").addEventListener("click", () => loadFiles());
   $("clear-done").addEventListener("click", clearDone);
   $("file-input").addEventListener("change", (event) => {
     addFiles(Array.from(event.target.files));
@@ -363,6 +343,8 @@ document.addEventListener("DOMContentLoaded", () => {
       event.returnValue = "";
     }
   });
+  document.addEventListener("visibilitychange", autoRefresh);
+  setInterval(autoRefresh, AUTO_REFRESH_MS);
   loadInfo();
   loadFiles();
 });

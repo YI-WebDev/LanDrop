@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 import secrets
 
 from starlette.datastructures import Headers
@@ -11,6 +12,10 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 COOKIE_NAME = "landrop_session"
 AUTH_PATH = "/auth"
+# PCの画面。127.0.0.1 で待ち受けるソケットからだけ使え、スマホ用とは別のトークンとCookieで認証する
+PC_PREFIX = "/pc"
+PC_AUTH_PATH = "/pc/auth"
+PC_COOKIE_NAME = "landrop_pc"
 # 認証済みのリクエストであることを後段のミドルウェアへ伝えるためのキー
 AUTHENTICATED_SCOPE_KEY = "landrop.authenticated"
 # 未認証でも返してよいもの（ファイル名やフォルダ構成を含まない画面部品のみ）
@@ -33,8 +38,8 @@ _MESSAGE_PAGE = """<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>LanDrop</title>
-<link rel="icon" href="data:,">
-<link rel="stylesheet" href="/static/style.css">
+<link rel="icon" href="/static/icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/static/ui.css">
 </head>
 <body class="message-page">
 <main class="message-card">
@@ -64,12 +69,28 @@ def is_same_origin(request: Request) -> bool:
     return origin == f"http://{request.headers.get('host', '')}"
 
 
+def is_local_connection(scope: Scope) -> bool:
+    """127.0.0.1 で待ち受けているソケットへの、このPC自身からの接続かどうか。"""
+    server, client = scope.get("server"), scope.get("client")
+    if not server or not client:
+        return False
+    try:
+        return ipaddress.ip_address(server[0]).is_loopback and ipaddress.ip_address(client[0]).is_loopback
+    except ValueError:
+        return False
+
+
+def _is_pc_path(path: str) -> bool:
+    return path == PC_PREFIX or path.startswith(PC_PREFIX + "/")
+
+
 class AuthMiddleware:
     """セッションCookieのないリクエストを、内容を一切返さずに拒否する。"""
 
-    def __init__(self, app: ASGIApp, session_key: str) -> None:
+    def __init__(self, app: ASGIApp, session_key: str, pc_session_key: str) -> None:
         self.app = app
         self.session_key = session_key
+        self.pc_session_key = pc_session_key
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
@@ -77,6 +98,9 @@ class AuthMiddleware:
             return
 
         path: str = scope["path"]
+        if _is_pc_path(path):
+            await self._pc(scope, receive, send)
+            return
         if path == AUTH_PATH or path.startswith(_PUBLIC_PREFIXES):
             await self.app(scope, receive, send)
             return
@@ -96,7 +120,31 @@ class AuthMiddleware:
         else:
             response = message_page(
                 "QRコードから接続してください",
-                "PCのターミナルに表示されたQRコードを、スマホのカメラで読み取ってください。",
+                "PCのLanDropの画面（またはターミナル）に表示されたQRコードを、スマホのカメラで読み取ってください。",
+                401,
+            )
+        await response(scope, receive, send)
+
+    async def _pc(self, scope: Scope, receive: Receive, send: Send) -> None:
+        response: Response
+        if not is_local_connection(scope):
+            # スマホなど他の機器からは、PCの画面があること自体を分からないようにする
+            response = JSONResponse({"detail": "Not Found"}, status_code=404)
+        elif scope["path"] == PC_AUTH_PATH:
+            await self.app(scope, receive, send)
+            return
+        elif token_matches(Request(scope).cookies.get(PC_COOKIE_NAME, ""), self.pc_session_key):
+            scope[AUTHENTICATED_SCOPE_KEY] = True
+            await self.app(scope, receive, send)
+            return
+        elif scope["path"].startswith(PC_PREFIX + "/api/"):
+            response = JSONResponse(
+                {"detail": "PCの画面の接続が確認できません。LanDropを起動し直してください。"}, status_code=401
+            )
+        else:
+            response = message_page(
+                "PCの画面を開き直してください",
+                "LanDropを起動したときに開いた画面か、ターミナルに表示された「PCの画面」のURLから開いてください。",
                 401,
             )
         await response(scope, receive, send)
