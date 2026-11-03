@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="format-detection" content="telephone=no">
+<meta name="theme-color" content="#f4f6f8" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0d1418" media="(prefers-color-scheme: dark)">
+<title>LanDrop</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="/static/style.css">
+<script src="/static/app.js" defer></script>
+</head>
+<body>
+<header class="topbar">
+  <div class="topbar-inner">
+    <p class="brand">
+      <svg class="brand-mark" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2.5c3.6 4.3 6.5 7.8 6.5 11.4a6.5 6.5 0 0 1-13 0C5.5 10.3 8.4 6.8 12 2.5Z"/><path class="brand-arrow" d="M12 9.5v6.5m-3-3 3 3 3-3"/></svg>
+      LanDrop
+    </p>
+    <div class="connection" id="connection">
+      <span class="connection-dot" aria-hidden="true"></span>
+      <div class="connection-text">
+        <p class="connection-name" id="pc-name">接続先を確認しています…</p>
+        <p class="connection-address" id="address"></p>
+      </div>
+    </div>
+  </div>
+</header>
+
+<main>
+  <section class="panel" id="panel-receive" role="tabpanel" aria-labelledby="tab-receive">
+    <div class="panel-head">
+      <div>
+        <h1>PCから受け取る</h1>
+        <p class="hint">PCの共有フォルダにあるファイルです。タップすると保存します。</p>
+      </div>
+      <button type="button" class="btn btn-ghost btn-icon" id="refresh" aria-label="一覧を更新">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 11a8 8 0 1 0-2.3 5.7M20 4.5V11h-6.5"/></svg>
+        <span>更新</span>
+      </button>
+    </div>
+    <p class="status-line" id="files-status" role="status"></p>
+    <ul class="file-list" id="file-list"></ul>
+  </section>
+
+  <section class="panel" id="panel-send" role="tabpanel" aria-labelledby="tab-send" hidden>
+    <div class="panel-head">
+      <div>
+        <h1>PCへ送る</h1>
+        <p class="hint">選んだファイルを1つずつ順番にPCへ送ります。上限は1ファイル<span id="max-size">—</span>です。</p>
+      </div>
+    </div>
+    <p class="status-line" id="send-summary" role="status"></p>
+    <ul class="queue" id="queue"></ul>
+    <div class="send-actions">
+      <input type="file" id="file-input" class="visually-hidden" multiple>
+      <label class="btn btn-primary btn-block" for="file-input">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V6m-5.5 5.5L12 6l5.5 5.5M5 3.5h14"/></svg>
+        ファイルを選んで送る
+      </label>
+      <button type="button" class="btn btn-ghost btn-block" id="clear-done" hidden>完了したものを一覧から消す</button>
+    </div>
+    <p class="hint small">送信中はこの画面を開いたままにしてください。送ったファイルは、この画面の一覧には表示されません。</p>
+  </section>
+
+  <p class="notice">通信は暗号化されていません。自宅など信頼できるネットワークでだけ使ってください。</p>
+</main>
+
+<nav class="tabbar" role="tablist" aria-label="切り替え">
+  <button type="button" class="tab" role="tab" id="tab-receive" aria-controls="panel-receive" aria-selected="true">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v12m-5.5-5.5L12 16l5.5-5.5M5 20.5h14"/></svg>
+    <span>受け取る</span>
+  </button>
+  <button type="button" class="tab" role="tab" id="tab-send" aria-controls="panel-send" aria-selected="false">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V7m-5.5 5.5L12 7l5.5 5.5M5 3.5h14"/></svg>
+    <span>送る</span>
+    <span class="tab-badge" id="send-badge" hidden></span>
+  </button>
+</nav>
+
+<div class="overlay" id="expired" hidden>
+  <div class="message-card" role="alertdialog" aria-labelledby="expired-title">
+    <p class="brand">LanDrop</p>
+    <h1 id="expired-title">接続が切れました</h1>
+    <p>PCでLanDropが停止したか、起動し直されました。PCに表示されている新しいQRコードを読み取ってください。</p>
+  </div>
+</div>
+</body>
+</html>

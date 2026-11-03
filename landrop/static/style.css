@@ -1,0 +1,633 @@
+/* LanDrop スマホ優先の画面スタイル（外部フォント・CDNは使わない） */
+
+:root {
+  color-scheme: light dark;
+  --bg: #f4f6f8;
+  --surface: #ffffff;
+  --surface-muted: #eef2f5;
+  --text: #15202b;
+  --muted: #5b6876;
+  --border: #dde3e9;
+  --accent: #0f766e;
+  --accent-pressed: #0b5e58;
+  --accent-soft: #d6efea;
+  --on-accent: #ffffff;
+  --ok: #15803d;
+  --ok-soft: #dcf3e2;
+  --danger: #b4410f;
+  --danger-soft: #fbe5da;
+  --shadow: 0 1px 2px rgb(16 24 40 / 6%), 0 1px 3px rgb(16 24 40 / 8%);
+  --radius: 16px;
+  --tabbar-height: 64px;
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Hiragino Sans", "Hiragino Kaku Gothic ProN",
+    "Noto Sans JP", "Yu Gothic UI", "Meiryo", sans-serif;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0d1418;
+    --surface: #152127;
+    --surface-muted: #1c2a31;
+    --text: #e6edf1;
+    --muted: #96a5ae;
+    --border: #263740;
+    --accent: #2dd4bf;
+    --accent-pressed: #5eead4;
+    --accent-soft: #123b38;
+    --on-accent: #062c29;
+    --ok: #4ade80;
+    --ok-soft: #133524;
+    --danger: #fb8c5a;
+    --danger-soft: #3d2016;
+    --shadow: none;
+  }
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+[hidden] {
+  display: none !important;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  min-height: 100dvh;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 16px;
+  line-height: 1.55;
+  -webkit-tap-highlight-color: transparent;
+  padding-bottom: calc(var(--tabbar-height) + var(--safe-bottom) + 24px);
+}
+
+h1,
+p {
+  margin: 0;
+}
+
+svg {
+  width: 24px;
+  height: 24px;
+  flex: none;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* ---------- 上部の接続先表示 ---------- */
+
+.topbar {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  background: var(--bg);
+  border-bottom: 1px solid var(--border);
+  padding: calc(env(safe-area-inset-top, 0px) + 10px) 16px 10px;
+}
+
+.topbar-inner {
+  max-width: 640px;
+  margin: 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 800;
+  font-size: 18px;
+  letter-spacing: 0.01em;
+}
+
+.brand-mark {
+  fill: var(--accent);
+  stroke: none;
+}
+
+.brand-mark .brand-arrow {
+  fill: none;
+  stroke: var(--on-accent);
+  stroke-width: 2;
+}
+
+.connection {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 6px 12px;
+  border-radius: 999px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+}
+
+.connection-dot {
+  width: 8px;
+  height: 8px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--ok);
+}
+
+.connection.is-offline .connection-dot {
+  background: var(--danger);
+}
+
+.connection-text {
+  min-width: 0;
+  text-align: right;
+}
+
+.connection-name,
+.connection-address {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.connection-name {
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.3;
+}
+
+.connection-address {
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.3;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------- 本文 ---------- */
+
+main {
+  max-width: 640px;
+  margin: 0 auto;
+  padding: 20px 16px 0;
+}
+
+.panel-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+h1 {
+  font-size: 22px;
+  line-height: 1.3;
+  font-weight: 800;
+  margin-bottom: 4px;
+}
+
+.hint {
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.hint.small {
+  font-size: 13px;
+  margin-top: 12px;
+}
+
+.status-line {
+  color: var(--muted);
+  font-size: 14px;
+  margin: 4px 0 10px;
+  min-height: 1.55em;
+}
+
+.status-line.is-error {
+  color: var(--danger);
+  font-weight: 600;
+}
+
+.notice {
+  margin-top: 28px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  background: var(--surface-muted);
+  color: var(--muted);
+  font-size: 13px;
+}
+
+/* ---------- ボタン ---------- */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 48px;
+  padding: 0 18px;
+  border: 0;
+  border-radius: 12px;
+  font: inherit;
+  font-weight: 700;
+  color: inherit;
+  background: none;
+  text-decoration: none;
+  cursor: pointer;
+  user-select: none;
+  touch-action: manipulation;
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.btn:focus-visible,
+.tab:focus-visible,
+.file:focus-visible,
+#file-input:focus-visible + .btn {
+  outline: 3px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.btn-primary {
+  background: var(--accent);
+  color: var(--on-accent);
+}
+
+.btn-primary:active {
+  background: var(--accent-pressed);
+}
+
+.btn-ghost {
+  background: var(--surface);
+  border: 1px solid var(--border);
+}
+
+.btn-ghost:active {
+  background: var(--surface-muted);
+}
+
+.btn-block {
+  width: 100%;
+  min-height: 56px;
+  font-size: 17px;
+}
+
+.btn-icon {
+  flex: none;
+  padding: 0 14px;
+}
+
+.btn-icon svg {
+  width: 20px;
+  height: 20px;
+}
+
+.btn-small {
+  min-height: 44px;
+  padding: 0 16px;
+  font-size: 15px;
+}
+
+.btn-danger {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* ---------- 共有ファイルの一覧 ---------- */
+
+.file-list,
+.queue {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.file {
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  min-height: 72px;
+  padding: 12px 12px 12px 14px;
+  border-radius: var(--radius);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow);
+  color: inherit;
+  text-decoration: none;
+  touch-action: manipulation;
+}
+
+.file:active {
+  background: var(--surface-muted);
+}
+
+.file-type {
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  border-radius: 12px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+  overflow: hidden;
+}
+
+.file-main {
+  min-width: 0;
+}
+
+.file-name,
+.file-meta {
+  display: block;
+}
+
+.file-name,
+.item-name {
+  font-weight: 700;
+  overflow-wrap: anywhere;
+  line-height: 1.4;
+}
+
+.file-meta,
+.item-meta {
+  color: var(--muted);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  margin-top: 2px;
+}
+
+.file-save {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 40px;
+  padding: 0 12px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--on-accent);
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.file-save svg {
+  width: 18px;
+  height: 18px;
+}
+
+.empty {
+  padding: 28px 20px;
+  border: 2px dashed var(--border);
+  border-radius: var(--radius);
+  text-align: center;
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.empty strong {
+  display: block;
+  color: var(--text);
+  font-size: 16px;
+  margin-bottom: 4px;
+}
+
+/* ---------- 送信の一覧 ---------- */
+
+.item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 4px 12px;
+  padding: 14px;
+  border-radius: var(--radius);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow);
+}
+
+.item-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.status {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 0 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 800;
+  background: var(--surface-muted);
+  color: var(--muted);
+}
+
+.item[data-status="uploading"] .status {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.item[data-status="done"] .status {
+  background: var(--ok-soft);
+  color: var(--ok);
+}
+
+.item[data-status="failed"] {
+  border-color: var(--danger);
+}
+
+.item[data-status="failed"] .status {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.item[data-status="failed"] .item-meta {
+  color: var(--danger);
+}
+
+.progress {
+  grid-column: 1 / -1;
+  height: 6px;
+  margin-top: 8px;
+  border-radius: 999px;
+  background: var(--surface-muted);
+  overflow: hidden;
+}
+
+.progress-bar {
+  height: 100%;
+  width: 100%;
+  border-radius: inherit;
+  background: var(--accent);
+  transform-origin: left center;
+  transform: scaleX(0);
+  transition: transform 0.2s linear;
+}
+
+.item[data-status="done"] .progress-bar {
+  background: var(--ok);
+}
+
+.item[data-status="failed"] .progress-bar {
+  background: var(--danger);
+}
+
+.send-actions {
+  position: sticky;
+  bottom: calc(var(--tabbar-height) + var(--safe-bottom) + 12px);
+  display: grid;
+  gap: 8px;
+  margin-top: 16px;
+  padding-top: 8px;
+  background: linear-gradient(to bottom, transparent, var(--bg) 12px);
+}
+
+/* ---------- 下部のタブ（親指で届く位置） ---------- */
+
+.tabbar {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 20;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  max-width: 640px;
+  margin: 0 auto;
+  height: calc(var(--tabbar-height) + var(--safe-bottom));
+  padding-bottom: var(--safe-bottom);
+  background: var(--surface);
+  border-top: 1px solid var(--border);
+}
+
+@media (min-width: 641px) {
+  .tabbar {
+    bottom: 12px;
+    border: 1px solid var(--border);
+    border-radius: 20px;
+    box-shadow: var(--shadow);
+  }
+}
+
+.tab {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  border: 0;
+  background: none;
+  color: var(--muted);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+.tab[aria-selected="true"] {
+  color: var(--accent);
+}
+
+.tab[aria-selected="true"]::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 30%;
+  right: 30%;
+  height: 3px;
+  border-radius: 0 0 3px 3px;
+  background: var(--accent);
+}
+
+.tab-badge {
+  position: absolute;
+  top: 8px;
+  left: calc(50% + 10px);
+  min-width: 20px;
+  height: 20px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: var(--on-accent);
+  font-size: 12px;
+  line-height: 20px;
+  text-align: center;
+}
+
+/* ---------- 接続切れの表示と、未認証時のページ ---------- */
+
+.overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgb(0 0 0 / 45%);
+}
+
+.message-page {
+  display: grid;
+  place-items: center;
+  padding: 24px;
+}
+
+.message-card {
+  width: 100%;
+  max-width: 420px;
+  padding: 28px 24px;
+  border-radius: 20px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow);
+}
+
+.message-card .brand {
+  color: var(--accent);
+  margin-bottom: 12px;
+}
+
+.message-card p:last-child {
+  color: var(--muted);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .progress-bar {
+    transition: none;
+  }
+}
