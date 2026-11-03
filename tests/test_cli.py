@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import re
 
 import pytest
@@ -121,6 +122,26 @@ def test_public_network_warning(monkeypatch: pytest.MonkeyPatch) -> None:
     assert cli._profile_warnings("192.168.1.6", [private], detailed=True) == []
     # 確認できなくても起動は続け、その旨だけを伝える
     assert "確認できません" in cli._profile_warnings("192.168.1.7", [], detailed=False)[0]
+
+
+def test_invalid_http_request_warning_becomes_one_japanese_notice(
+    caplog: pytest.LogCaptureFixture, capsys: pytest.CaptureFixture[str]
+) -> None:
+    logger = logging.getLogger("tests.uvicorn.error")
+    notice = cli._InvalidRequestNotice()
+    logger.addFilter(notice)
+    try:
+        for _ in range(3):
+            logger.warning("Invalid HTTP request received.")
+        logger.warning("ほかの警告")
+    finally:
+        logger.removeFilter(notice)
+
+    # 英語の警告は出さず、ほかの警告はそのまま通す
+    assert [r.getMessage() for r in caplog.records] == ["ほかの警告"]
+    out = capsys.readouterr().out
+    assert out.count("[お知らせ]") == 1
+    assert "http://" in out
 
 
 def _decode(rendered: str) -> list[list[bool]]:

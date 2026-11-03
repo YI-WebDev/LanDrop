@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import ipaddress
+import logging
 import os
 import re
 import socket
@@ -154,19 +155,20 @@ def _run(args: argparse.Namespace) -> int:
     app = create_app(config)
     _print_banner(config, args.timeout, requested_port, _profile_warnings(ip, interfaces, detailed))
 
-    server = uvicorn.Server(
-        uvicorn.Config(
-            app,
-            host=ip,
-            port=config.port,
-            # アクセスログにはQRコードのURL（トークン）が残るため出力しない
-            access_log=False,
-            log_level="warning",
-            server_header=False,
-            # 停止時に転送中の接続を待ち続けないようにする（.part は削除される）
-            timeout_graceful_shutdown=5,
-        )
+    uvicorn_config = uvicorn.Config(
+        app,
+        host=ip,
+        port=config.port,
+        # アクセスログにはQRコードのURL（トークン）が残るため出力しない
+        access_log=False,
+        log_level="warning",
+        server_header=False,
+        # 停止時に転送中の接続を待ち続けないようにする（.part は削除される）
+        timeout_graceful_shutdown=5,
     )
+    # Config の作成時にUvicornがログを設定し直すため、フィルターはその後で付ける
+    logging.getLogger("uvicorn.error").addFilter(_InvalidRequestNotice())
+    server = uvicorn.Server(uvicorn_config)
     stop_watching = threading.Event()
     if args.timeout > 0:
         threading.Thread(
@@ -308,6 +310,31 @@ def _print_banner(config: AppConfig, timeout: float, requested_port: int, warnin
     print("   詳しくは README.md の「接続できないとき」を参照してください。")
     print()
     print("  Ctrl+C で停止します。", flush=True)
+
+
+class _InvalidRequestNotice(logging.Filter):
+    """HTTPとして読めない接続についてのUvicornの英語の警告を、日本語のお知らせ1回に置き換える。
+
+    ブラウザが http:// のアドレスをまず https:// で開こうとすると、TLSの接続要求が届いてこの警告が出る。
+    ブラウザはその後HTTPで接続し直すことが多く、接続のたびに繰り返し表示されると紛らわしい。
+    """
+
+    _MESSAGE = "Invalid HTTP request received."
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._shown = False
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.getMessage() != self._MESSAGE:
+            return True
+        if not self._shown:
+            self._shown = True
+            print("\n  [お知らせ] HTTPとして読めない接続を受け取ったため、受け付けずに切断しました。")
+            print("             ブラウザが https:// で接続を試したときなどに起こり、LanDropの動作には影響しません。")
+            print("             スマホでページが開かないときは、アドレスが http:// で始まっているか確認してください。")
+            print("             （このお知らせは1回だけ表示します）", flush=True)
+        return False
 
 
 def _watch_idle(server: uvicorn.Server, tracker: IdleTracker, stop: threading.Event, minutes: float) -> None:
