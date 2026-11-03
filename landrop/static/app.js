@@ -143,7 +143,10 @@ function renderFiles(files) {
     const empty = el("li", "empty");
     empty.append(el("strong", "", "共有するファイルがありません"));
     empty.append(
-      document.createTextNode("PCの共有フォルダ（LanDrop/share）にファイルを入れてから「更新」を押してください。")
+      // --share で場所を変えられるため、フォルダ名ではなくターミナルの表示を案内する
+      document.createTextNode(
+        "PCのターミナルに「共有フォルダ」として表示されているフォルダにファイルを入れてから、「更新」を押してください。"
+      )
     );
     list.append(empty);
     return;
