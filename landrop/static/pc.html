@@ -61,7 +61,19 @@
       </div>
     </section>
 
-    <p class="notice" data-tone="warning">通信は暗号化されません（HTTP）。自宅など信頼できるネットワークでだけ使ってください。</p>
+    <div class="notices" id="notices"></div>
+    <p class="notice" data-tone="warning">通信は暗号化されません（HTTP）。公共Wi-Fi・ホテル・カフェなど、知らない人と共有するネットワークでは使わないでください。</p>
+
+    <details class="card help">
+      <summary>スマホから接続できないとき</summary>
+      <ol>
+        <li>スマホとPCが同じWi-Fi（同じルーター）につながっているか確認する</li>
+        <li>ゲストWi-Fiや端末どうしの通信を遮断する設定、スマホのVPNがオフか確認する</li>
+        <li>Windowsのファイアウォールで、LanDrop の「プライベート ネットワーク」での通信を許可する</li>
+        <li>上部のアドレスが、スマホと同じネットワークのものか確認する</li>
+      </ol>
+      <p class="fine-print">詳しくは README.md の「接続できないとき」を参照してください。</p>
+    </details>
   </aside>
 
   <main class="content">

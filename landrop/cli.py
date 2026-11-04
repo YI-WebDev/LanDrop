@@ -29,6 +29,8 @@ DEFAULT_TIMEOUT_MINUTES = 30.0
 # 画面のないアプリとして起動したときに、ターミナルへの表示の代わりに書き出すファイル
 LOG_FILE = Path.home() / "LanDrop" / "LanDrop.log"
 _WATCH_SECONDS = 0.5
+# ダブルクリックで起動したアプリのように、表示先のターミナルがないか
+_windowless = False
 _SIZE_UNITS = {"": 1, "K": 1024, "M": 1024**2, "G": 1024**3, "T": 1024**4}
 
 
@@ -126,16 +128,17 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _keep_error_visible() -> None:
-    """ダブルクリックで起動したアプリが、エラーを読む前に閉じてしまわないようにする。"""
-    if not getattr(sys, "frozen", False):
+    """ターミナルのないアプリとして起動したときは、起動できなかった理由をダイアログで知らせる。"""
+    if not _windowless:
         return
-    if _stdin_is_tty():
-        try:
-            input("\nEnterキーを押すと閉じます。")
-        except EOFError:
-            pass
-    else:
-        desktop.alert("LanDrop を起動できませんでした", f"詳しくは {LOG_FILE} を確認してください。")
+    sys.stdout.flush()
+    try:
+        lines = [line.strip() for line in LOG_FILE.read_text(encoding="utf-8").splitlines()]
+    except OSError:
+        lines = []
+    # 最初の「ネットワークを確認しています...」は理由ではないので省く
+    reason = "\n".join(line for line in lines if line and not line.startswith("ネットワークを確認"))
+    desktop.alert("LanDrop を起動できませんでした", f"{reason}\n\n（記録: {LOG_FILE}）")
 
 
 def _run(args: argparse.Namespace) -> int:
@@ -154,7 +157,9 @@ def _run(args: argparse.Namespace) -> int:
 
     print("ネットワークを確認しています...", flush=True)
     interfaces, detailed = network.find_interfaces()
-    ip = _validate_ip(args.ip, interfaces) if args.ip else _select_ip(interfaces, detailed)
+    # 起動時の注意。ターミナルとPCの画面の両方に表示する
+    notices: list[str] = []
+    ip = _validate_ip(args.ip, interfaces, notices) if args.ip else _select_ip(interfaces, detailed, notices)
     if ip is None:
         return 2
 
@@ -168,7 +173,14 @@ def _run(args: argparse.Namespace) -> int:
         print(f"{ip} で待ち受けできませんでした: {e}")
         print("このPCのLANのIPアドレスか確認し、--ip で指定し直してください。")
         return 1
+    if sock.getsockname()[1] != requested_port:
+        notices.append(f"ポート {requested_port} が使用中のため、{sock.getsockname()[1]} を使います。")
     pc_sock = _bind_pc_socket(ip, sock)
+    if pc_sock is None and _windowless:
+        # ターミナルもPCの画面もないと、QRコードを見せる場所がない
+        sock.close()
+        return 1
+    notices += _profile_warnings(ip, interfaces, detailed)
 
     tracker = IdleTracker(args.timeout * 60)
     config = AppConfig(
@@ -179,11 +191,11 @@ def _run(args: argparse.Namespace) -> int:
         max_size=args.max_size,
         pc_name=socket.gethostname(),
         tracker=tracker,
+        notices=tuple(notices),
     )
     app = create_app(config)
     pc_url = f"http://127.0.0.1:{pc_sock.getsockname()[1]}{PC_AUTH_PATH}?t={config.pc_token}" if pc_sock else None
-    warnings = _profile_warnings(ip, interfaces, detailed)
-    _print_banner(config, args.timeout, requested_port, warnings, pc_url, args.no_open)
+    _print_banner(config, args.timeout, pc_url, args.no_open)
 
     uvicorn_config = uvicorn.Config(
         app,
@@ -224,11 +236,11 @@ def _bind_pc_socket(ip: str, lan_sock: socket.socket) -> socket.socket | None:
     try:
         return network.bind_socket("127.0.0.1", lan_sock.getsockname()[1], search=True)
     except OSError as e:
-        print(f"[注意] PCの画面を用意できませんでした（{e}）。スマホとの送受信はこのまま使えます。")
+        print(f"[注意] PCの画面を用意できませんでした（{e}）。")
         return None
 
 
-def _validate_ip(text: str, interfaces: list[network.Interface]) -> str | None:
+def _validate_ip(text: str, interfaces: list[network.Interface], notices: list[str]) -> str | None:
     try:
         addr = ipaddress.IPv4Address(text)
     except ValueError:
@@ -240,15 +252,15 @@ def _validate_ip(text: str, interfaces: list[network.Interface]) -> str | None:
     match = next((i for i in interfaces if i.ip == str(addr)), None)
     reason = network.exclusion_reason(match) if match else None
     if reason:
-        print(f"[注意] {addr} は「{reason}」のようです。スマホから接続できない場合は別のアドレスを指定してください。")
+        notices.append(f"{addr} は「{reason}」のようです。スマホから接続できない場合は別のアドレスを指定してください。")
     return str(addr)
 
 
-def _select_ip(interfaces: list[network.Interface], detailed: bool) -> str | None:
+def _select_ip(interfaces: list[network.Interface], detailed: bool, notices: list[str]) -> str | None:
     chosen = network.choose_interface(interfaces, network.default_route_ip())
     if chosen is not None:
         if not detailed:
-            print(f"[注意] アダプターの情報を取得できなかったため {chosen.ip} を使います。違う場合は --ip で指定してください。")
+            notices.append(f"アダプターの情報を取得できなかったため {chosen.ip} を使います。違う場合は --ip で指定してください。")
         return chosen.ip
 
     # スマホから届くことのないループバックとリンクローカルは選択肢に出さない
@@ -261,6 +273,16 @@ def _select_ip(interfaces: list[network.Interface], detailed: bool) -> str | Non
         print("LANのIPv4アドレスが見つかりませんでした。")
         print("Wi-Fiや有線LANにつながっているか確認するか、--ip でアドレスを指定してください。")
         return None
+
+    if _windowless:
+        # 番号を入力してもらえないため、いちばん有力な候補を使い、ほかの候補はPCの画面で知らせる
+        best, others = candidates[0], "、".join(i.ip for i in candidates[1:])
+        notices.append(
+            f"LANのアドレスを1つに決められなかったため、{best.ip}（{best.label}）を使っています。"
+            f"スマホから接続できないときは、ショートカットのリンク先の最後に「--ip {candidates[1].ip}」のように"
+            f"ほかの候補（{others}）を付けて起動し直してください。"
+        )
+        return best.ip
 
     print("\nLANのIPアドレスを1つに確定できませんでした。スマホと同じネットワークのものを選んでください。")
     for number, iface in enumerate(candidates, 1):
@@ -292,17 +314,14 @@ def _profile_warnings(ip: str, interfaces: list[network.Interface], detailed: bo
     if match.category != "Public":
         return []
     return [
-        f"「{match.name}」は「パブリック ネットワーク」に設定されています。",
-        "Windowsのファイアウォールにより、スマホから接続できない可能性があります。",
-        "自宅など信頼できるネットワークであれば、設定 > ネットワークとインターネット >",
-        "Wi-Fi（またはイーサネット）> ネットワーク プロファイルの種類 で「プライベート」に変更してください。",
-        "（LanDropは設定を自動では変更しません）",
+        f"「{match.name}」は「パブリック ネットワーク」に設定されているため、Windowsのファイアウォールにより"
+        "スマホから接続できない可能性があります。自宅など信頼できるネットワークであれば、設定 > "
+        "ネットワークとインターネット > Wi-Fi（またはイーサネット）> ネットワーク プロファイルの種類 で"
+        "「プライベート」に変更してください（LanDropは設定を自動では変更しません）。"
     ]
 
 
-def _print_banner(
-    config: AppConfig, timeout: float, requested_port: int, warnings: list[str], pc_url: str | None, no_open: bool
-) -> None:
+def _print_banner(config: AppConfig, timeout: float, pc_url: str | None, no_open: bool) -> None:
     timeout_text = f"{timeout:g}分間操作がなければ停止" if timeout > 0 else "しない"
     rows = [
         ("PC名", config.pc_name),
@@ -340,24 +359,16 @@ def _print_banner(
         print()
 
     notices = [
-        [
-            "通信は暗号化されません（HTTP）。公共Wi-Fi・ホテル・カフェなど、",
-            "知らない人と共有するネットワークでは使わないでください。",
-        ]
+        "通信は暗号化されません（HTTP）。公共Wi-Fi・ホテル・カフェなど、知らない人と共有するネットワークでは使わないでください。",
+        *config.notices,
     ]
-    if config.port != requested_port:
-        notices.append([f"ポート {requested_port} が使用中のため、{config.port} を使います。"])
-    if warnings:
-        notices.append(warnings)
-    for first, *rest in notices:
-        print(f"  [注意] {first}")
-        for line in rest:
-            print(f"         {line}")
+    for notice in notices:
+        print(f"  [注意] {notice}")
     print()
     print("  接続できないときは:")
     print("   1. スマホとPCが同じWi-Fi（同じルーター）につながっているか確認する")
     print("   2. ゲストWi-Fiや端末どうしの通信を遮断する設定、スマホのVPNがオフか確認する")
-    print("   3. Windowsのファイアウォールで、Python の「プライベート ネットワーク」での通信を許可する")
+    print("   3. Windowsのファイアウォールで、LanDrop（または Python）の「プライベート ネットワーク」での通信を許可する")
     print(f"   4. 別のアドレスで起動し直す: {_command()} --ip <このPCのIPアドレス>")
     print("   詳しくは README.md の「接続できないとき」を参照してください。")
     print()
@@ -412,8 +423,10 @@ def _pad(text: str, width: int) -> str:
 
 
 def _prepare_console() -> None:
+    global _windowless
     if sys.stdout is None:
-        # 画面のないアプリ（macOSの .app）として起動したときは、表示をファイルに残す
+        # ターミナルのないアプリ（LanDrop.exe・LanDrop.app）として起動したときは、表示をファイルに残す
+        _windowless = True
         LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
         sys.stdout = sys.stderr = open(LOG_FILE, "w", encoding="utf-8", buffering=1)  # noqa: SIM115
     # 表示できない文字（フォルダ名の絵文字など）があっても起動を止めない

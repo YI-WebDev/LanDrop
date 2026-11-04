@@ -120,6 +120,7 @@ async function loadStatus(auto = false) {
     $("share-dir").textContent = status.share_dir;
     $("received-dir").textContent = status.received_dir;
     renderTimer(status.remaining_seconds);
+    renderNotices(status.notices || []);
   } catch {
     // 停止の表示は api() が行う
   }
@@ -134,6 +135,19 @@ function renderTimer(remaining) {
   } else {
     timer.textContent = `操作がなければ あと${Math.ceil(remaining / 60)}分で自動停止`;
   }
+}
+
+// 起動時の注意（パブリック ネットワーク、ポートの変更など）。起動中は変わらないので一度だけ描く
+function renderNotices(notices) {
+  const box = $("notices");
+  if (box.childElementCount === notices.length) return;
+  box.replaceChildren(
+    ...notices.map((text) => {
+      const notice = el("p", "notice", text);
+      notice.dataset.tone = "warning";
+      return notice;
+    })
+  );
 }
 
 let toastTimer = 0;
@@ -499,8 +513,9 @@ function setupDragAndDrop() {
     event.preventDefault();
     event.dataTransfer.dropEffect = state.stopped ? "none" : "copy";
   });
-  window.addEventListener("dragleave", (event) => {
-    if (!hasFiles(event)) return;
+  window.addEventListener("dragleave", () => {
+    // 窓の外へ出たときやドラッグをやめたときは、種類を問わず数え直す
+    if (overlay.hidden) return;
     depth = Math.max(0, depth - 1);
     if (depth === 0) overlay.hidden = true;
   });

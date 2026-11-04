@@ -137,6 +137,8 @@ def _windows_interfaces() -> list[Interface] | None:
             capture_output=True,
             timeout=20,
             check=True,
+            # ターミナルのないアプリから呼んでも、PowerShellの黒い窓を出さない
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
         return parse_windows_json(result.stdout.decode("utf-8-sig", "replace"))
     except (OSError, subprocess.SubprocessError, ValueError):

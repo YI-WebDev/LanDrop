@@ -85,6 +85,8 @@ class AppConfig:
     pc_token: str = field(default_factory=lambda: secrets.token_urlsafe(32))
     pc_session_key: str = field(default_factory=lambda: secrets.token_urlsafe(32))
     stop: StopRequest = field(default_factory=StopRequest)
+    # 起動時の注意（パブリック ネットワークなど）。PCの画面に表示する
+    notices: tuple[str, ...] = ()
     # PCの画面が閉じられてから停止するまでの猶予。再読み込みなら、この間に開き直される
     close_grace_seconds: float = 4.0
 
@@ -221,6 +223,7 @@ def create_app(config: AppConfig) -> FastAPI:
             "received_dir": str(config.received_dir),
             "max_size": config.max_size,
             "remaining_seconds": config.tracker.remaining_seconds(),
+            "notices": list(config.notices),
         }
 
     @app.get(PC_PREFIX + "/qr.svg")

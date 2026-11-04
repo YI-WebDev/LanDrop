@@ -380,3 +380,9 @@ def test_window_connection_is_not_reachable_from_other_devices(make_config: Call
 
     asyncio.run(app(scope, receive, send))
     assert sent[0]["status"] == 404
+
+
+def test_status_includes_startup_notices(make_pc: PcFactory) -> None:
+    client, _ = make_pc(notices=("「Wi-Fi」は「パブリック ネットワーク」に設定されています。",))
+
+    assert client.get("/pc/api/status").json()["notices"] == ["「Wi-Fi」は「パブリック ネットワーク」に設定されています。"]

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import socket
+import subprocess
 
 import pytest
 
@@ -123,3 +124,17 @@ def test_bind_socket_fails_for_explicit_port_in_use() -> None:
         port = busy.getsockname()[1]
         with pytest.raises(network.PortUnavailableError):
             network.bind_socket("127.0.0.1", port, search=False)
+
+
+def test_powershell_runs_without_a_console_window(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: dict[str, object] = {}
+
+    def fake_run(*args: object, **kwargs: object) -> None:
+        seen.update(kwargs)
+        raise OSError("実行しない")
+
+    monkeypatch.setattr(network.subprocess, "run", fake_run)
+
+    # ターミナルのないアプリから呼んでも、PowerShellの黒い窓が出ないようにする
+    assert network._windows_interfaces() is None
+    assert seen["creationflags"] == getattr(subprocess, "CREATE_NO_WINDOW", 0)

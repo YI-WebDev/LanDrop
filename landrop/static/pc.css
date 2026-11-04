@@ -110,6 +110,37 @@
   font-size: var(--text-xs);
 }
 
+/* ---------- 起動時の注意と、つながらないとき ---------- */
+
+.notices {
+  display: grid;
+  gap: var(--space-2);
+}
+
+.notices:empty {
+  display: none;
+}
+
+.help {
+  padding: var(--space-3) var(--space-5);
+  font-size: var(--text-sm);
+}
+
+.help summary {
+  font-weight: var(--weight-bold);
+  cursor: pointer;
+}
+
+.help ol {
+  margin: var(--space-2) 0;
+  padding-left: 1.4em;
+  color: var(--color-text-muted);
+}
+
+.help li + li {
+  margin-top: var(--space-1);
+}
+
 /* ---------- フォルダ ---------- */
 
 .folders-card {

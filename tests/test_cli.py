@@ -8,6 +8,7 @@ import re
 import socket
 import threading
 import types
+from pathlib import Path
 
 import pytest
 import qrcode
@@ -75,15 +76,16 @@ def test_format_size() -> None:
 
 @pytest.mark.parametrize("ip", ["0.0.0.0", "255.255.255.255", "224.0.0.1", "abc", "192.168.1"])
 def test_unusable_ip_option_is_rejected(ip: str, capsys: pytest.CaptureFixture[str]) -> None:
-    assert cli._validate_ip(ip, []) is None
+    assert cli._validate_ip(ip, [], []) is None
     assert capsys.readouterr().out
 
 
-def test_ip_option_warns_for_virtual_adapter(capsys: pytest.CaptureFixture[str]) -> None:
+def test_ip_option_warns_for_virtual_adapter() -> None:
     wsl = Interface("172.27.112.1", "vEthernet (WSL)", "Hyper-V Virtual Ethernet Adapter")
+    notices: list[str] = []
 
-    assert cli._validate_ip("172.27.112.1", [wsl]) == "172.27.112.1"
-    assert "仮想アダプター" in capsys.readouterr().out
+    assert cli._validate_ip("172.27.112.1", [wsl], notices) == "172.27.112.1"
+    assert "仮想アダプター" in notices[0]
 
 
 def test_ambiguous_ip_lists_candidates_when_not_interactive(
@@ -97,7 +99,7 @@ def test_ambiguous_ip_lists_candidates_when_not_interactive(
         Interface("127.0.0.1", "Loopback"),
     ]
 
-    assert cli._select_ip(interfaces, detailed=True) is None
+    assert cli._select_ip(interfaces, detailed=True, notices=[]) is None
     out = capsys.readouterr().out
     assert "192.168.1.5" in out and "192.168.2.5" in out
     assert "127.0.0.1" not in out
@@ -114,7 +116,7 @@ def test_ambiguous_ip_can_be_chosen_interactively(monkeypatch: pytest.MonkeyPatc
         Interface("192.168.2.5", "イーサネット", has_gateway=True),
     ]
 
-    assert cli._select_ip(interfaces, detailed=True) == "192.168.2.5"
+    assert cli._select_ip(interfaces, detailed=True, notices=[]) == "192.168.2.5"
 
 
 def test_public_network_warning(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -208,3 +210,41 @@ def test_watcher_stops_server_on_request(capsys: pytest.CaptureFixture[str]) -> 
 
     assert server.should_exit is True
     assert "PCの画面から停止しました。" in capsys.readouterr().out
+
+
+def test_ambiguous_ip_uses_best_candidate_without_terminal(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(cli, "_windowless", True)
+    monkeypatch.setattr(cli.network, "default_route_ip", lambda: None)
+    interfaces = [
+        Interface("192.168.1.5", "Wi-Fi", has_gateway=True),
+        Interface("192.168.2.5", "イーサネット", has_gateway=True),
+    ]
+    notices: list[str] = []
+
+    # 番号を入力できないので、いちばん有力な候補を使い、ほかの候補を注意として残す
+    assert cli._select_ip(interfaces, detailed=True, notices=notices) == "192.168.1.5"
+    assert "--ip 192.168.2.5" in notices[0]
+
+
+def test_startup_error_is_shown_in_a_dialog_without_terminal(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    log = tmp_path / "LanDrop.log"
+    log.write_text("ネットワークを確認しています...\nポート 8765 は使用中か、使用できません。\n", encoding="utf-8")
+    monkeypatch.setattr(cli, "LOG_FILE", log)
+    monkeypatch.setattr(cli, "_windowless", True)
+    shown: list[tuple[str, str]] = []
+    monkeypatch.setattr(cli.desktop, "alert", lambda title, message: shown.append((title, message)))
+
+    cli._keep_error_visible()
+
+    assert shown[0][0] == "LanDrop を起動できませんでした"
+    assert "ポート 8765 は使用中" in shown[0][1]
+    assert "ネットワークを確認" not in shown[0][1]
+
+
+def test_startup_error_has_no_dialog_in_terminal(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(cli, "_windowless", False)
+    monkeypatch.setattr(cli.desktop, "alert", lambda *_: pytest.fail("ターミナルで起動したのにダイアログを出した"))
+
+    cli._keep_error_visible()
