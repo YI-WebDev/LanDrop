@@ -514,7 +514,7 @@ function setupDragAndDrop() {
     event.dataTransfer.dropEffect = state.stopped ? "none" : "copy";
   });
   window.addEventListener("dragleave", () => {
-    // 窓の外へ出たときやドラッグをやめたときは、種類を問わず数え直す
+    // ウィンドウの外へ出たときやドラッグをやめたときは、種類を問わず数え直す
     if (overlay.hidden) return;
     depth = Math.max(0, depth - 1);
     if (depth === 0) overlay.hidden = true;
@@ -611,7 +611,7 @@ function setupStop() {
       // すでに止まっている
     }
     showStopped("停止しました", "この画面は閉じてかまいません。");
-    // 起動時に開いた窓なら、そのまま閉じる（閉じられないブラウザでは表示だけ残る）
+    // 起動時に開いたウィンドウなら、そのまま閉じる（閉じられないブラウザでは表示だけ残る）
     setTimeout(() => window.close(), 600);
   });
 }

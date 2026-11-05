@@ -386,3 +386,17 @@ def test_status_includes_startup_notices(make_pc: PcFactory) -> None:
     client, _ = make_pc(notices=("「Wi-Fi」は「パブリック ネットワーク」に設定されています。",))
 
     assert client.get("/pc/api/status").json()["notices"] == ["「Wi-Fi」は「パブリック ネットワーク」に設定されています。"]
+
+
+def test_closing_the_app_window_stops_after_transfers(make_config: Callable[..., AppConfig]) -> None:
+    config = _pc_config(make_config, close_grace_seconds=0.05)
+    app = create_app(config)
+    config.tracker.active_requests = 1  # スマホがダウンロード中
+
+    # LanDrop自身のウィンドウが閉じられた（つなぎっぱなしの接続の有無は問わない）
+    app.state.pc_window_closed()
+    time.sleep(0.3)
+    assert config.stop.reason is None
+
+    config.tracker.active_requests = 0
+    assert _wait_until(lambda: config.stop.reason == "PCの画面が閉じられたため、停止しました。")

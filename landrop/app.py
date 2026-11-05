@@ -143,15 +143,19 @@ def create_app(config: AppConfig) -> FastAPI:
         except OSError:
             return None
 
-    def stop_when_closed() -> None:
-        if open_windows:
-            # 再読み込みや、別の窓で開き直された
+    def stop_after_close(still_closed: Callable[[], bool]) -> None:
+        """PCの画面が閉じられたら、転送が終わってから停止する。"""
+        if not still_closed():
+            # 再読み込みや、別のウィンドウで開き直された
             return
         if receiver.in_progress or config.tracker.active_requests:
             # 転送中なら、終わるのを待ってから止める
-            _later(config.close_grace_seconds, stop_when_closed)
+            _later(config.close_grace_seconds, lambda: stop_after_close(still_closed))
             return
         config.stop.request("PCの画面が閉じられたため、停止しました。")
+
+    # LanDrop自身のウィンドウ（WebView2）が閉じられたときに、起動した側から呼ぶ
+    app.state.pc_window_closed = lambda: stop_after_close(lambda: True)
 
     # ---------- スマホの画面 ----------
 
@@ -234,7 +238,7 @@ def create_app(config: AppConfig) -> FastAPI:
     def pc_events() -> StreamingResponse:
         """PCの画面が開いている間つないでおく接続。切れたら、画面が閉じられたとみなす。
 
-        窓を閉じるとブラウザごと終了することもあるため、閉じるときの連絡には頼らない。
+        ウィンドウを閉じるとブラウザごと終了することもあるため、閉じるときの連絡には頼らない。
         """
 
         async def stream() -> AsyncIterator[bytes]:
@@ -247,7 +251,7 @@ def create_app(config: AppConfig) -> FastAPI:
                     await asyncio.sleep(_EVENTS_CHECK_SECONDS)
             finally:
                 open_windows -= 1
-                _later(config.close_grace_seconds, stop_when_closed)
+                _later(config.close_grace_seconds, lambda: stop_after_close(lambda: open_windows == 0))
 
         return StreamingResponse(stream(), media_type="text/plain")
 

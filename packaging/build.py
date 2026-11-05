@@ -47,7 +47,7 @@ def main() -> None:
         "--specpath",
         str(WORK),
     ]
-    # ターミナルの窓は開かない。QRコードや注意はPCの画面に出し、表示は ~/LanDrop/LanDrop.log に残す
+    # ターミナルのウィンドウは開かない。QRコードや注意はPCの画面に出し、表示は ~/LanDrop/LanDrop.log に残す
     args += ["--windowed"]
     if sys.platform == "darwin":
         args += ["--osx-bundle-identifier", "local.landrop.app"]

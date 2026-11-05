@@ -11,6 +11,7 @@ import socket
 import sys
 import threading
 import unicodedata
+from collections.abc import Callable
 from pathlib import Path
 
 import uvicorn
@@ -213,12 +214,15 @@ def _run(args: argparse.Namespace) -> int:
     server = uvicorn.Server(uvicorn_config)
     finished = threading.Event()
     threading.Thread(target=_watch, args=(server, tracker, config.stop, finished, args.timeout), daemon=True).start()
-    if pc_url and not args.no_open:
-        # ソケットはすでに待ち受けているので、サーバーの準備より先に開いてもつながる
-        desktop.open_app_window(pc_url)
     sockets = [sock] if pc_sock in (None, sock) else [sock, pc_sock]
     try:
-        server.run(sockets=sockets)
+        if pc_url and not args.no_open and desktop.window_available():
+            _serve_with_window(server, sockets, pc_url, app.state.pc_window_closed)
+        else:
+            if pc_url and not args.no_open:
+                # ソケットはすでに待ち受けているので、サーバーの準備より先に開いてもつながる
+                desktop.open_app_window(pc_url)
+            server.run(sockets=sockets)
     except KeyboardInterrupt:
         pass
     finally:
@@ -227,6 +231,34 @@ def _run(args: argparse.Namespace) -> int:
             s.close()
     print("LanDrop を停止しました。")
     return 0
+
+
+def _serve_with_window(
+    server: uvicorn.Server, sockets: list[socket.socket], pc_url: str, window_closed: Callable[[], None]
+) -> None:
+    """サーバーを別のスレッドで動かし、メインスレッドでLanDrop自身のウィンドウを開く。"""
+
+    def serve() -> None:
+        try:
+            server.run(sockets=sockets)
+        finally:
+            # 停止ボタンや自動停止で止まったときは、ウィンドウも閉じる
+            desktop.close_window()
+
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+    if desktop.run_window(pc_url):
+        # ウィンドウが閉じられた。転送中なら、終わってから止まる
+        window_closed()
+    else:
+        desktop.open_app_window(pc_url)
+    try:
+        # Ctrl+C を受け付けられるよう、少しずつ待つ
+        while thread.is_alive():
+            thread.join(0.5)
+    except KeyboardInterrupt:
+        server.should_exit = True
+        thread.join()
 
 
 def _bind_pc_socket(ip: str, lan_sock: socket.socket) -> socket.socket | None:

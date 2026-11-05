@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import os
 import shutil
 import subprocess
@@ -9,9 +10,41 @@ import sys
 import webbrowser
 from pathlib import Path
 
+WINDOW_TITLE = "LanDrop"
+
+
+def window_available() -> bool:
+    """LanDrop自身のウィンドウ（WindowsではWebView2、macOSではWKWebView）を開けるか。"""
+    return importlib.util.find_spec("webview") is not None
+
+
+def run_window(url: str) -> bool:
+    """LanDrop自身のウィンドウでPCの画面を開き、閉じられるまで待つ。開けなかったら False を返す。
+
+    ウィンドウはメインスレッドでしか動かせないので、サーバーは別のスレッドで動かしておく。
+    """
+    import webview
+
+    webview.create_window(WINDOW_TITLE, url, width=1200, height=820, min_size=(720, 560), text_select=True)
+    try:
+        webview.start(gui="edgechromium" if sys.platform == "win32" else None)
+    except Exception:  # noqa: BLE001  WebView2 が入っていないなど。理由を問わずブラウザで開き直す
+        return False
+    return True
+
+
+def close_window() -> None:
+    """開いているLanDropのウィンドウを閉じる。ほかのスレッドから呼んでよい。"""
+    if not window_available():
+        return
+    import webview
+
+    for window in list(webview.windows):
+        window.destroy()
+
 
 def open_app_window(url: str) -> None:
-    """アドレスバーのないアプリ用の窓で開く。EdgeやChromeがなければ、いつものブラウザで開く。"""
+    """アドレスバーのないアプリ用のウィンドウで開く。EdgeやChromeがなければ、いつものブラウザで開く。"""
     command = _app_window_command()
     if command:
         try:
@@ -23,7 +56,7 @@ def open_app_window(url: str) -> None:
 
 
 def _app_window_command() -> list[str] | None:
-    """アプリ用の窓（--app）を開ける、Chromium系のブラウザを起動するコマンド。"""
+    """アプリ用のウィンドウ（--app）を開ける、Chromium系のブラウザを起動するコマンド。"""
     if sys.platform == "win32":
         roots = [os.environ.get(name) for name in ("ProgramFiles(x86)", "ProgramFiles", "LocalAppData")]
         for root in filter(None, roots):

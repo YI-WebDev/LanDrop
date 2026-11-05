@@ -135,6 +135,6 @@ def test_powershell_runs_without_a_console_window(monkeypatch: pytest.MonkeyPatc
 
     monkeypatch.setattr(network.subprocess, "run", fake_run)
 
-    # ターミナルのないアプリから呼んでも、PowerShellの黒い窓が出ないようにする
+    # ターミナルのないアプリから呼んでも、PowerShellの黒いウィンドウが出ないようにする
     assert network._windows_interfaces() is None
     assert seen["creationflags"] == getattr(subprocess, "CREATE_NO_WINDOW", 0)
