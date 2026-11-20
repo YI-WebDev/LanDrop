@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import ipaddress
+import json
 import logging
 import os
 import re
@@ -11,12 +12,14 @@ import socket
 import sys
 import threading
 import unicodedata
+from collections.abc import Callable
 from pathlib import Path
 
 import uvicorn
 
-from landrop import __version__, desktop, network
+from landrop import __version__, desktop, mdns, network
 from landrop.app import AppConfig, create_app
+from landrop.devices import DeviceStore
 from landrop.idle import IdleTracker, StopRequest
 from landrop.qr import render_qr
 from landrop.security import PC_AUTH_PATH
@@ -28,6 +31,10 @@ DEFAULT_MAX_SIZE = "10GB"
 DEFAULT_TIMEOUT_MINUTES = 30.0
 # 画面のないアプリとして起動したときに、ターミナルへの表示の代わりに書き出すファイル
 LOG_FILE = Path.home() / "LanDrop" / "LanDrop.log"
+# 一度接続したスマホの一覧（鍵はハッシュだけを保存する）
+DEVICES_FILE = Path.home() / "LanDrop" / "devices.json"
+# 前回使ったポート。同じポートで起動すれば、スマホのホーム画面のアドレスがそのまま使える
+STATE_FILE = Path.home() / "LanDrop" / "state.json"
 _WATCH_SECONDS = 0.5
 # ダブルクリックで起動したアプリのように、表示先のターミナルがないか
 _windowless = False
@@ -78,7 +85,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("-h", "--help", action="help", help="このヘルプを表示して終了する")
     parser.add_argument("--ip", help="待ち受けるLANのIPv4アドレス（省略時は自動検出）")
     parser.add_argument(
-        "--port", type=_port, help=f"待ち受けるポート番号（省略時は {DEFAULT_PORT}。使用中なら空きを探す）"
+        "--port",
+        type=_port,
+        help=f"待ち受けるポート番号（省略時は前回と同じ番号、初めては {DEFAULT_PORT}。使用中なら空きを探す）",
     )
     parser.add_argument(
         "--share", type=Path, default=DEFAULT_SHARE, help="スマホへ渡すファイルを置くフォルダ（既定: %(default)s）"
@@ -101,6 +110,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="無操作が続いたら自動停止するまでの分数。0で自動停止しない（既定: 30）",
     )
     parser.add_argument("--no-open", action="store_true", help="起動時にPCの画面を開かない")
+    parser.add_argument(
+        "--forget-devices",
+        action="store_true",
+        help="覚えているスマホをすべて忘れる（次はQRコードの読み取りが必要）",
+    )
     parser.add_argument(
         "--version", action="version", version=f"LanDrop {__version__}", help="バージョンを表示して終了する"
     )
@@ -163,7 +177,7 @@ def _run(args: argparse.Namespace) -> int:
     if ip is None:
         return 2
 
-    requested_port = args.port or DEFAULT_PORT
+    requested_port = args.port or _last_port() or DEFAULT_PORT
     try:
         sock = network.bind_socket(ip, requested_port, search=args.port is None)
     except network.PortUnavailableError:
@@ -174,7 +188,11 @@ def _run(args: argparse.Namespace) -> int:
         print("このPCのLANのIPアドレスか確認し、--ip で指定し直してください。")
         return 1
     if sock.getsockname()[1] != requested_port:
-        notices.append(f"ポート {requested_port} が使用中のため、{sock.getsockname()[1]} を使います。")
+        notices.append(
+            f"ポート {requested_port} が使用中のため、{sock.getsockname()[1]} を使います。"
+            "スマホのホーム画面から開けないときは、QRコードを読み取り直してください。"
+        )
+    _remember_port(requested_port, sock.getsockname()[1])
     pc_sock = _bind_pc_socket(ip, sock)
     if pc_sock is None and _windowless:
         # ターミナルもPCの画面もないと、QRコードを見せる場所がない
@@ -183,15 +201,26 @@ def _run(args: argparse.Namespace) -> int:
     notices += _profile_warnings(ip, interfaces, detailed)
 
     tracker = IdleTracker(args.timeout * 60)
+    if args.forget_devices:
+        try:
+            DEVICES_FILE.unlink(missing_ok=True)
+        except OSError as e:
+            notices.append(f"覚えているスマホの一覧を消せませんでした: {e}")
+    pc_name = socket.gethostname()
+    is_loopback = ipaddress.IPv4Address(ip).is_loopback
+    # ループバックではスマホから届かないので、名前も告知しない
+    advertiser = None if is_loopback else mdns.Advertiser(mdns.local_name(pc_name), ip, sock.getsockname()[1])
     config = AppConfig(
         share_dir=share_dir,
         received_dir=received_dir,
         host_ip=ip,
         port=sock.getsockname()[1],
         max_size=args.max_size,
-        pc_name=socket.gethostname(),
+        pc_name=pc_name,
         tracker=tracker,
         notices=tuple(notices),
+        devices=DeviceStore(DEVICES_FILE),
+        local_name=advertiser.name if advertiser else None,
     )
     app = create_app(config)
     pc_url = f"http://127.0.0.1:{pc_sock.getsockname()[1]}{PC_AUTH_PATH}?t={config.pc_token}" if pc_sock else None
@@ -213,20 +242,78 @@ def _run(args: argparse.Namespace) -> int:
     server = uvicorn.Server(uvicorn_config)
     finished = threading.Event()
     threading.Thread(target=_watch, args=(server, tracker, config.stop, finished, args.timeout), daemon=True).start()
-    if pc_url and not args.no_open:
-        # ソケットはすでに待ち受けているので、サーバーの準備より先に開いてもつながる
-        desktop.open_app_window(pc_url)
     sockets = [sock] if pc_sock in (None, sock) else [sock, pc_sock]
+    if advertiser:
+        advertiser.start()
     try:
-        server.run(sockets=sockets)
+        if pc_url and not args.no_open and desktop.window_available():
+            _serve_with_window(server, sockets, pc_url, app.state.pc_window_closed)
+        else:
+            if pc_url and not args.no_open:
+                # ソケットはすでに待ち受けているので、サーバーの準備より先に開いてもつながる
+                desktop.open_app_window(pc_url)
+            server.run(sockets=sockets)
     except KeyboardInterrupt:
         pass
     finally:
         finished.set()
+        if advertiser:
+            advertiser.close()
         for s in sockets:
             s.close()
     print("LanDrop を停止しました。")
     return 0
+
+
+def _last_port() -> int | None:
+    try:
+        port = json.loads(STATE_FILE.read_text(encoding="utf-8")).get("port")
+    except (OSError, ValueError, AttributeError):
+        return None
+    return port if isinstance(port, int) and 1024 <= port <= 65535 else None
+
+
+def _remember_port(requested: int, actual: int) -> None:
+    """空きを探して別の番号になったときは覚えない。一時的に使われていただけなら、次は元の番号に戻れる。"""
+    if actual == requested:
+        _save_last_port(actual)
+
+
+def _save_last_port(port: int) -> None:
+    try:
+        STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        STATE_FILE.write_text(json.dumps({"port": port}), encoding="utf-8")
+    except OSError:
+        # 覚えられなくても、次は既定のポートから探すだけ
+        pass
+
+
+def _serve_with_window(
+    server: uvicorn.Server, sockets: list[socket.socket], pc_url: str, window_closed: Callable[[], None]
+) -> None:
+    """サーバーを別のスレッドで動かし、メインスレッドでLanDrop自身のウィンドウを開く。"""
+
+    def serve() -> None:
+        try:
+            server.run(sockets=sockets)
+        finally:
+            # 停止ボタンや自動停止で止まったときは、ウィンドウも閉じる
+            desktop.close_window()
+
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+    if desktop.run_window(pc_url):
+        # ウィンドウが閉じられた。転送中なら、終わってから止まる
+        window_closed()
+    else:
+        desktop.open_app_window(pc_url)
+    try:
+        # Ctrl+C を受け付けられるよう、少しずつ待つ
+        while thread.is_alive():
+            thread.join(0.5)
+    except KeyboardInterrupt:
+        server.should_exit = True
+        thread.join()
 
 
 def _bind_pc_socket(ip: str, lan_sock: socket.socket) -> socket.socket | None:
@@ -350,6 +437,11 @@ def _print_banner(config: AppConfig, timeout: float, pc_url: str | None, no_open
     print("  （このURLを知っている人は誰でも接続できます。他の人に見せないでください）")
     print(f"  {config.access_url}")
     print()
+    if config.devices is not None:
+        print("  一度接続したスマホは覚えておくので、次からはQRコードなしで開けます（30日間使わなければ忘れます）。")
+        if config.local_url:
+            print(f"  名前のアドレス: {config.local_url}  （スマホのホーム画面に追加すると、IPアドレスが変わっても開けます）")
+        print()
     if pc_url:
         if no_open:
             print("  PCの画面を使うときは、このPCのブラウザで次のURLを開いてください。")

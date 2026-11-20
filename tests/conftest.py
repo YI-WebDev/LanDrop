@@ -30,6 +30,15 @@ class FakeClock:
         self.now += seconds
 
 
+@pytest.fixture(autouse=True)
+def _isolated_state_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """起動の処理を通すテストが、ホームフォルダの devices.json・state.json を書き換えないようにする。"""
+    from landrop import cli
+
+    monkeypatch.setattr(cli, "DEVICES_FILE", tmp_path / "state" / "devices.json")
+    monkeypatch.setattr(cli, "STATE_FILE", tmp_path / "state" / "state.json")
+
+
 @pytest.fixture
 def share_dir(tmp_path: Path) -> Path:
     path = tmp_path / "share"

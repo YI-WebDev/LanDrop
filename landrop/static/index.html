@@ -31,6 +31,16 @@
 </header>
 
 <main>
+  <section class="card home-tip" id="home-tip" aria-labelledby="home-tip-title" hidden>
+    <div class="home-tip-text">
+      <h2 id="home-tip-title">次からはQRコードなしで開けます</h2>
+      <p class="hint">このページをホーム画面に追加しておくと、PCでLanDropを起動したあと、タップするだけで開けます。</p>
+      <p class="hint">iPhone: 共有ボタン →「ホーム画面に追加」<br>Android: ︙ メニュー →「ホーム画面に追加」</p>
+      <p class="hint" id="home-tip-ip" hidden>このアドレスはPCのIPアドレスなので、ルーターがPCのアドレスを変えると開けなくなります。そのときはQRコードを読み取り直してください。</p>
+    </div>
+    <button type="button" class="btn btn-quiet btn-sm" id="home-tip-close">閉じる</button>
+  </section>
+
   <section class="panel" id="panel-receive" role="tabpanel" aria-labelledby="tab-receive">
     <div class="panel-head">
       <div>
@@ -84,8 +94,8 @@
 <div class="overlay" id="expired" hidden>
   <div class="message-card" role="alertdialog" aria-labelledby="expired-title">
     <p class="brand">LanDrop</p>
-    <h1 id="expired-title">接続が切れました</h1>
-    <p>PCでLanDropが停止したか、起動し直されました。PCに表示されている新しいQRコードを読み取ってください。</p>
+    <h1 id="expired-title">QRコードを読み取ってください</h1>
+    <p>PCでLanDropが起動し直されたか、このスマホの登録がPCの画面で解除されました。PCに表示されているQRコードを読み取ってください。</p>
   </div>
 </div>
 </body>

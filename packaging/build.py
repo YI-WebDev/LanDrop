@@ -37,6 +37,9 @@ def main() -> None:
         # Uvicorn は設定の文字列から部品を読み込むため、まとめて含めておく
         "--collect-submodules",
         "uvicorn",
+        # mDNS（名前のアドレス）。Cythonでビルドされた部品も含める
+        "--collect-submodules",
+        "zeroconf",
         # PNGからOSごとのアイコン形式への変換には Pillow を使う
         "--icon",
         str(HERE / "icon.png"),
@@ -47,7 +50,7 @@ def main() -> None:
         "--specpath",
         str(WORK),
     ]
-    # ターミナルの窓は開かない。QRコードや注意はPCの画面に出し、表示は ~/LanDrop/LanDrop.log に残す
+    # ターミナルのウィンドウは開かない。QRコードや注意はPCの画面に出し、表示は ~/LanDrop/LanDrop.log に残す
     args += ["--windowed"]
     if sys.platform == "darwin":
         args += ["--osx-bundle-identifier", "local.landrop.app"]

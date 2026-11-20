@@ -31,6 +31,7 @@ const state = {
   stopped: false,
   viewerFiles: [],
   viewerIndex: -1,
+  devicesSignature: "",
 };
 
 class Stopped extends Error {}
@@ -121,6 +122,55 @@ async function loadStatus(auto = false) {
     $("received-dir").textContent = status.received_dir;
     renderTimer(status.remaining_seconds);
     renderNotices(status.notices || []);
+    $("devices-card").hidden = !status.remembers_devices;
+    const localUrl = $("local-url");
+    localUrl.hidden = !status.local_url;
+    localUrl.textContent = status.local_url ? `スマホでの名前のアドレス: ${status.local_url}` : "";
+    if (status.remembers_devices) await loadDevices(auto);
+  } catch {
+    // 停止の表示は api() が行う
+  }
+}
+
+// ---------- 覚えているスマホ ----------
+
+async function loadDevices(auto = false) {
+  const { devices } = await api("/pc/api/devices", { auto });
+  const signature = JSON.stringify(devices);
+  if (signature === state.devicesSignature) return;
+  state.devicesSignature = signature;
+  $("devices-empty").hidden = devices.length > 0;
+  $("device-list").replaceChildren(
+    ...devices.map((device) => {
+      const item = el("li", "device");
+      const text = el("div", "device-text");
+      text.append(
+        el("p", "device-label", device.label),
+        el("p", "device-meta", `最後の接続 ${formatDate(device.last_seen)}`)
+      );
+      const forget = el("button", "btn btn-quiet btn-sm", "解除");
+      forget.type = "button";
+      forget.setAttribute("aria-label", `${device.label}（最後の接続 ${formatDate(device.last_seen)}）の登録を解除`);
+      forget.addEventListener("click", () => forgetDevice(device, forget));
+      item.append(text, forget);
+      return item;
+    })
+  );
+}
+
+async function forgetDevice(device, button) {
+  if (!confirm(`「${device.label}」の登録を解除しますか？
+このスマホは、次に開くときにQRコードの読み取りが必要になります。`)) return;
+  button.disabled = true;
+  try {
+    await api(`/pc/api/devices/forget?${query({ id: device.id })}`, { method: "POST" });
+    toast(`「${device.label}」の登録を解除しました`);
+  } catch (error) {
+    if (!(error instanceof Stopped)) toast(error.message, "danger");
+  }
+  button.disabled = false;
+  try {
+    await loadDevices();
   } catch {
     // 停止の表示は api() が行う
   }
@@ -514,7 +564,7 @@ function setupDragAndDrop() {
     event.dataTransfer.dropEffect = state.stopped ? "none" : "copy";
   });
   window.addEventListener("dragleave", () => {
-    // 窓の外へ出たときやドラッグをやめたときは、種類を問わず数え直す
+    // ウィンドウの外へ出たときやドラッグをやめたときは、種類を問わず数え直す
     if (overlay.hidden) return;
     depth = Math.max(0, depth - 1);
     if (depth === 0) overlay.hidden = true;
@@ -611,7 +661,7 @@ function setupStop() {
       // すでに止まっている
     }
     showStopped("停止しました", "この画面は閉じてかまいません。");
-    // 起動時に開いた窓なら、そのまま閉じる（閉じられないブラウザでは表示だけ残る）
+    // 起動時に開いたウィンドウなら、そのまま閉じる（閉じられないブラウザでは表示だけ残る）
     setTimeout(() => window.close(), 600);
   });
 }

@@ -1,8 +1,9 @@
-"""PCのデスクトップとの連携（アプリ用の窓を開く）。"""
+"""PCのデスクトップとの連携（アプリ用のウィンドウを開く）。"""
 
 from __future__ import annotations
 
 import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -50,3 +51,57 @@ def test_reveal_quotes_the_path(monkeypatch: pytest.MonkeyPatch) -> None:
     desktop.reveal(Path(r"C:\Users\a\LanDrop\received\写真, 旅行 (1).jpg"))
 
     assert launched == [r'explorer.exe /select,"C:\Users\a\LanDrop\received\写真, 旅行 (1).jpg"']
+
+
+class _FakeWebview(types.ModuleType):
+    """pywebview の代わり。開いたウィンドウと、閉じた回数を覚える。"""
+
+    def __init__(self, fail: bool = False) -> None:
+        super().__init__("webview")
+        self.fail = fail
+        self.windows: list[types.SimpleNamespace] = []
+        self.started_with: list[object] = []
+
+    def create_window(self, title: str, url: str, **options: object) -> types.SimpleNamespace:
+        window = types.SimpleNamespace(title=title, url=url, destroyed=False)
+        window.destroy = lambda: setattr(window, "destroyed", True)
+        self.windows.append(window)
+        return window
+
+    def start(self, gui: object = None) -> None:
+        self.started_with.append(gui)
+        if self.fail:
+            raise RuntimeError("WebView2 がない")
+
+
+def test_run_window_opens_webview2(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = _FakeWebview()
+    monkeypatch.setitem(sys.modules, "webview", fake)
+
+    assert desktop.run_window(URL) is True
+    assert [(w.title, w.url) for w in fake.windows] == [("LanDrop", URL)]
+    assert fake.started_with == ["edgechromium"]
+
+
+def test_run_window_reports_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setitem(sys.modules, "webview", _FakeWebview(fail=True))
+
+    assert desktop.run_window(URL) is False
+
+
+def test_close_window_destroys_open_windows(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = _FakeWebview()
+    fake.create_window("LanDrop", URL)
+    monkeypatch.setitem(sys.modules, "webview", fake)
+    monkeypatch.setattr(desktop, "window_available", lambda: True)
+
+    desktop.close_window()
+
+    assert fake.windows[0].destroyed is True
+
+
+def test_window_needs_pywebview(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(desktop.importlib.util, "find_spec", lambda name: None)
+
+    assert desktop.window_available() is False
+    desktop.close_window()  # 何もしない

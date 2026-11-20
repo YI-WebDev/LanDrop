@@ -7,6 +7,7 @@ import logging
 import re
 import socket
 import threading
+import time
 import types
 from pathlib import Path
 
@@ -248,3 +249,48 @@ def test_startup_error_has_no_dialog_in_terminal(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr(cli.desktop, "alert", lambda *_: pytest.fail("ターミナルで起動したのにダイアログを出した"))
 
     cli._keep_error_visible()
+
+
+class _FakeServer:
+    """`server.run` を呼ぶと、`should_exit` が立つまで動き続けるサーバーの代わり。"""
+
+    def __init__(self) -> None:
+        self.should_exit = False
+        self.stopped = threading.Event()
+
+    def run(self, sockets: list[socket.socket]) -> None:
+        while not self.should_exit:
+            time.sleep(0.01)
+        self.stopped.set()
+
+
+def test_window_close_stops_the_server_and_waits_for_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    server = _FakeServer()
+    closed: list[str] = []
+    monkeypatch.setattr(cli.desktop, "run_window", lambda url: True)
+    monkeypatch.setattr(cli.desktop, "close_window", lambda: closed.append("close"))
+    monkeypatch.setattr(cli.desktop, "open_app_window", lambda url: pytest.fail("ブラウザで開き直した"))
+
+    cli._serve_with_window(server, [], "http://127.0.0.1:8765/pc", lambda: setattr(server, "should_exit", True))  # type: ignore[arg-type]
+
+    # ウィンドウが閉じられたら停止を頼み、サーバーが止まるまで待つ
+    assert server.stopped.is_set()
+    assert closed == ["close"]
+
+
+def test_falls_back_to_the_browser_when_the_window_cannot_open(monkeypatch: pytest.MonkeyPatch) -> None:
+    server = _FakeServer()
+    opened: list[str] = []
+    monkeypatch.setattr(cli.desktop, "run_window", lambda url: False)
+    monkeypatch.setattr(cli.desktop, "close_window", lambda: None)
+
+    def open_in_browser(url: str) -> None:
+        opened.append(url)
+        server.should_exit = True  # ブラウザの画面から停止した
+
+    monkeypatch.setattr(cli.desktop, "open_app_window", open_in_browser)
+
+    cli._serve_with_window(server, [], "http://127.0.0.1:8765/pc", lambda: pytest.fail("閉じたことにした"))  # type: ignore[arg-type]
+
+    assert opened == ["http://127.0.0.1:8765/pc"]
+    assert server.stopped.is_set()
