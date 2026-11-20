@@ -10,6 +10,8 @@ from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, Response
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
+from landrop.devices import DEVICE_COOKIE_NAME, DeviceStore
+
 COOKIE_NAME = "landrop_session"
 AUTH_PATH = "/auth"
 # PCの画面。127.0.0.1 で待ち受けるソケットからだけ使え、スマホ用とは別のトークンとCookieで認証する
@@ -18,6 +20,8 @@ PC_AUTH_PATH = "/pc/auth"
 PC_COOKIE_NAME = "landrop_pc"
 # 認証済みのリクエストであることを後段のミドルウェアへ伝えるためのキー
 AUTHENTICATED_SCOPE_KEY = "landrop.authenticated"
+# 覚えている端末のCookieで通したときの、その端末のid
+DEVICE_SCOPE_KEY = "landrop.device"
 # 未認証でも返してよいもの（ファイル名やフォルダ構成を含まない画面部品のみ）
 _PUBLIC_PREFIXES = ("/static/",)
 
@@ -31,6 +35,16 @@ SECURITY_HEADERS = {
     ),
     "Cache-Control": "no-store",
 }
+
+
+def security_headers(extra_img_src: str | None = None) -> dict[str, str]:
+    """extra_img_src: 画像の読み込みを許す別のオリジン（名前のアドレスで開けるかの確認に使う）。"""
+    headers = dict(SECURITY_HEADERS)
+    if extra_img_src:
+        headers["Content-Security-Policy"] = headers["Content-Security-Policy"].replace(
+            "img-src 'self' data:", f"img-src 'self' data: {extra_img_src}"
+        )
+    return headers
 
 _MESSAGE_PAGE = """<!doctype html>
 <html lang="ja">
@@ -87,10 +101,13 @@ def _is_pc_path(path: str) -> bool:
 class AuthMiddleware:
     """セッションCookieのないリクエストを、内容を一切返さずに拒否する。"""
 
-    def __init__(self, app: ASGIApp, session_key: str, pc_session_key: str) -> None:
+    def __init__(
+        self, app: ASGIApp, session_key: str, pc_session_key: str, devices: DeviceStore | None = None
+    ) -> None:
         self.app = app
         self.session_key = session_key
         self.pc_session_key = pc_session_key
+        self.devices = devices
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
@@ -105,9 +122,16 @@ class AuthMiddleware:
             await self.app(scope, receive, send)
             return
 
-        cookie = Request(scope).cookies.get(COOKIE_NAME, "")
+        cookies = Request(scope).cookies
+        cookie = cookies.get(COOKIE_NAME, "")
         if cookie and token_matches(cookie, self.session_key):
             scope[AUTHENTICATED_SCOPE_KEY] = True
+            await self.app(scope, receive, send)
+            return
+        device_id = self.devices.authenticate(cookies.get(DEVICE_COOKIE_NAME, "")) if self.devices else None
+        if device_id is not None:
+            scope[AUTHENTICATED_SCOPE_KEY] = True
+            scope[DEVICE_SCOPE_KEY] = device_id
             await self.app(scope, receive, send)
             return
 
@@ -153,8 +177,9 @@ class AuthMiddleware:
 class SecurityHeadersMiddleware:
     """すべてのレスポンスにセキュリティ関連のヘッダーを付ける。"""
 
-    def __init__(self, app: ASGIApp) -> None:
+    def __init__(self, app: ASGIApp, headers: dict[str, str] | None = None) -> None:
         self.app = app
+        self.headers = headers or SECURITY_HEADERS
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
@@ -166,7 +191,7 @@ class SecurityHeadersMiddleware:
                 existing = Headers(raw=message.get("headers", []))
                 extra = [
                     (key.lower().encode("latin-1"), value.encode("latin-1"))
-                    for key, value in SECURITY_HEADERS.items()
+                    for key, value in self.headers.items()
                     if key not in existing
                 ]
                 message["headers"] = list(message.get("headers", [])) + extra

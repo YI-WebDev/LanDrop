@@ -17,6 +17,10 @@ const STATUS_TONES = {
 
 // 一覧の自動更新の間隔。自動更新は「操作」に数えないので、開いたままでも自動停止は効く
 const AUTO_REFRESH_MS = 4000;
+// 名前のアドレス（landrop-xxx.local）で開けるか確かめるときに待つ時間
+const LOCAL_PROBE_MS = 2500;
+const HOME_TIP_KEY = "landrop.home-tip-closed";
+const HOP_TRIED_KEY = "landrop.local-hop-tried";
 
 const state = {
   maxSize: Infinity,
@@ -62,13 +66,80 @@ async function loadInfo() {
   try {
     const info = await getJSON("/api/info");
     $("pc-name").textContent = info.pc_name;
-    $("address").textContent = info.address;
+    // 実際に開いているアドレス（名前のアドレスで開いていれば、そちら）を表示する
+    $("address").textContent = `http://${location.host}`;
     state.maxSize = info.max_size;
     $("max-size").textContent = ` ${formatSize(info.max_size)} `;
+    if (info.remembered) await offerHomeScreen(info);
   } catch (error) {
     if (error instanceof SessionExpired) showExpired();
     else $("pc-name").textContent = "接続できません";
   }
+}
+
+// ---------- 2回目からQRコードなしで開く ----------
+
+function storageGet(storage, key) {
+  try {
+    return storage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+function storageSet(storage, key) {
+  try {
+    storage.setItem(key, "1");
+  } catch {
+    // 保存できなくても、案内がもう一度出るだけ
+  }
+}
+
+// 名前のアドレスがこのスマホから引けるか、公開されている画像の読み込みで確かめる
+function canReach(origin) {
+  return new Promise((resolve) => {
+    const image = new Image();
+    const timer = setTimeout(() => {
+      image.src = "";
+      resolve(false);
+    }, LOCAL_PROBE_MS);
+    image.onload = () => {
+      clearTimeout(timer);
+      resolve(true);
+    };
+    image.onerror = () => {
+      clearTimeout(timer);
+      resolve(false);
+    };
+    image.src = `${origin}/static/icon.svg?probe=${Date.now()}`;
+  });
+}
+
+async function offerHomeScreen(info) {
+  const local = info.local_url ? new URL(info.local_url) : null;
+  const onLocal = local !== null && location.host === local.host;
+  // IPアドレスで開いていて名前のアドレスが使えるなら、IPアドレスが変わっても開ける名前のアドレスへ移る。
+  // 移れなかったときに繰り返さないよう、このタブで試すのは一度だけ
+  if (local && !onLocal && !storageGet(sessionStorage, HOP_TRIED_KEY) && state.queue.length === 0) {
+    storageSet(sessionStorage, HOP_TRIED_KEY);
+    if (await canReach(local.origin)) {
+      try {
+        const response = await fetch("/api/handoff", { method: "POST", credentials: "same-origin" });
+        if (response.ok) {
+          const { url } = await response.json();
+          if (state.queue.length === 0) {
+            location.replace(url);
+            return;
+          }
+        }
+      } catch {
+        // 移れなければ、このままIPアドレスで使う
+      }
+    }
+  }
+  if (storageGet(localStorage, HOME_TIP_KEY)) return;
+  $("home-tip-ip").hidden = onLocal;
+  $("home-tip").hidden = false;
 }
 
 // ---------- PC → スマホ ----------
@@ -332,6 +403,10 @@ document.addEventListener("DOMContentLoaded", () => {
   $("tab-send").addEventListener("click", () => selectTab("send"));
   $("refresh").addEventListener("click", () => loadFiles());
   $("clear-done").addEventListener("click", clearDone);
+  $("home-tip-close").addEventListener("click", () => {
+    $("home-tip").hidden = true;
+    storageSet(localStorage, HOME_TIP_KEY);
+  });
   $("file-input").addEventListener("change", (event) => {
     addFiles(Array.from(event.target.files));
     // 同じファイルをもう一度選べるようにする

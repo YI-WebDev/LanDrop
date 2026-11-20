@@ -19,6 +19,13 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from starlette.requests import ClientDisconnect
 
 from landrop import desktop
+from landrop.devices import (
+    ALREADY_REMEMBERED,
+    DEVICE_COOKIE_MAX_AGE,
+    DEVICE_COOKIE_NAME,
+    DeviceStore,
+    device_label,
+)
 from landrop.filenames import content_disposition
 from landrop.idle import ActivityMiddleware, IdleTracker, StopRequest
 from landrop.qr import render_qr_svg
@@ -29,9 +36,11 @@ from landrop.security import (
     PC_COOKIE_NAME,
     PC_PREFIX,
     AuthMiddleware,
+    DEVICE_SCOPE_KEY,
     SecurityHeadersMiddleware,
     is_same_origin,
     message_page,
+    security_headers,
     token_matches,
 )
 from landrop.storage import Receiver, UploadError, find_file, list_files
@@ -89,10 +98,18 @@ class AppConfig:
     notices: tuple[str, ...] = ()
     # PCの画面が閉じられてから停止するまでの猶予。再読み込みなら、この間に開き直される
     close_grace_seconds: float = 4.0
+    # 一度接続したスマホを覚えておく場所。None なら覚えず、起動ごとにQRコードを読み取ってもらう
+    devices: DeviceStore | None = None
+    # LAN内に告知する名前（例: landrop-my-pc.local）。None なら名前のアドレスを使わない
+    local_name: str | None = None
 
     @property
     def base_url(self) -> str:
         return f"http://{self.host_ip}:{self.port}"
+
+    @property
+    def local_url(self) -> str | None:
+        return f"http://{self.local_name}:{self.port}" if self.local_name else None
 
     @property
     def access_url(self) -> str:
@@ -159,26 +176,66 @@ def create_app(config: AppConfig) -> FastAPI:
 
     # ---------- スマホの画面 ----------
 
+    def remember(response: Response, secret: str) -> Response:
+        response.set_cookie(
+            DEVICE_COOKIE_NAME, secret, max_age=DEVICE_COOKIE_MAX_AGE, httponly=True, samesite="lax", path="/"
+        )
+        return response
+
     @app.get(AUTH_PATH)
-    def auth(t: str = "") -> Response:
-        if not token_matches(t, config.token):
+    def auth(request: Request, t: str = "", h: str = "") -> Response:
+        # トークンがアドレスバーや履歴に残らないよう、トークンなしのURLへ移動させる
+        response = RedirectResponse("/", status_code=303)
+        devices = config.devices
+        if h and devices is not None:
+            # 名前のアドレスへ移ってきた。同じ端末として、このアドレス用の鍵を渡す
+            current = devices.authenticate(request.cookies.get(DEVICE_COOKIE_NAME, ""))
+            secret = devices.redeem_handoff(h, current_device=current)
+            if secret == ALREADY_REMEMBERED:
+                return response
+            if secret is not None:
+                return remember(response, secret)
+        if not t or not token_matches(t, config.token):
             return message_page(
                 "このリンクは使えません",
                 "LanDropを起動し直した場合は、新しく表示されたQRコードを読み取ってください。",
                 403,
             )
-        # トークンがアドレスバーや履歴に残らないよう、トークンなしのURLへ移動させる
-        response = RedirectResponse("/", status_code=303)
-        response.set_cookie(COOKIE_NAME, config.session_key, httponly=True, samesite="lax", path="/")
-        return response
+        if devices is None:
+            response.set_cookie(COOKIE_NAME, config.session_key, httponly=True, samesite="lax", path="/")
+            return response
+        if devices.authenticate(request.cookies.get(DEVICE_COOKIE_NAME, "")) is not None:
+            # すでに覚えている端末。QRコードを読み直しても、端末を増やさない
+            return response
+        return remember(response, devices.register(device_label(request.headers.get("user-agent", ""))))
 
     @app.get("/")
     def index() -> FileResponse:
         return FileResponse(STATIC_DIR / "index.html", media_type="text/html; charset=utf-8")
 
     @app.get("/api/info")
-    def info() -> dict[str, object]:
-        return {"pc_name": config.pc_name, "address": config.base_url, "max_size": config.max_size}
+    def info(request: Request) -> dict[str, object]:
+        return {
+            "pc_name": config.pc_name,
+            "address": config.base_url,
+            "max_size": config.max_size,
+            # 覚えている端末か（次からQRコードなしで開けるか）
+            "remembered": DEVICE_SCOPE_KEY in request.scope,
+            "local_url": config.local_url,
+        }
+
+    @app.post("/api/handoff")
+    def handoff(request: Request) -> Response:
+        """名前のアドレス（landrop-xxx.local）で開き直すためのURLを返す。Cookieはアドレスごとに別なので、鍵を渡し直す。"""
+        if not is_same_origin(request):
+            return _error(403, "このページ以外からの操作は受け付けません。")
+        device_id = request.scope.get(DEVICE_SCOPE_KEY)
+        if config.devices is None or config.local_url is None or device_id is None:
+            return _error(404, "名前のアドレスは使えません。")
+        token = config.devices.create_handoff(device_id)
+        if token is None:
+            return _error(404, "名前のアドレスは使えません。")
+        return JSONResponse({"url": f"{config.local_url}{AUTH_PATH}?h={token}"})
 
     @app.get("/api/files")
     def files() -> Response:
@@ -223,6 +280,8 @@ def create_app(config: AppConfig) -> FastAPI:
             "pc_name": config.pc_name,
             "address": config.base_url,
             "phone_url": config.access_url,
+            "local_url": config.local_url,
+            "remembers_devices": config.devices is not None,
             "share_dir": str(config.share_dir),
             "received_dir": str(config.received_dir),
             "max_size": config.max_size,
@@ -309,6 +368,18 @@ def create_app(config: AppConfig) -> FastAPI:
             return _error(500, "フォルダを開けませんでした。")
         return Response(status_code=204)
 
+    @app.get(PC_PREFIX + "/api/devices")
+    def pc_devices() -> dict[str, object]:
+        return {"devices": config.devices.list() if config.devices else []}
+
+    @app.post(PC_PREFIX + "/api/devices/forget")
+    def pc_forget_device(request: Request, id: str = "") -> Response:  # noqa: A002
+        if not is_same_origin(request):
+            return _error(403, "このページ以外からの操作は受け付けません。")
+        if config.devices is None or not config.devices.forget(id):
+            return _error(404, "端末が見つかりません。")
+        return Response(status_code=204)
+
     @app.post(PC_PREFIX + "/api/stop")
     def pc_stop(request: Request) -> Response:
         if not is_same_origin(request):
@@ -320,13 +391,18 @@ def create_app(config: AppConfig) -> FastAPI:
 
     # 後から追加したものほど外側で動く
     app.add_middleware(ActivityMiddleware, tracker=config.tracker)
-    app.add_middleware(AuthMiddleware, session_key=config.session_key, pc_session_key=config.pc_session_key)
     app.add_middleware(
-        TrustedHostMiddleware,
-        allowed_hosts=[config.host_ip, "localhost", "127.0.0.1"],
-        www_redirect=False,
+        AuthMiddleware,
+        session_key=config.session_key,
+        pc_session_key=config.pc_session_key,
+        devices=config.devices,
     )
-    app.add_middleware(SecurityHeadersMiddleware)
+    hosts = [config.host_ip, "localhost", "127.0.0.1"]
+    if config.local_name:
+        hosts.append(config.local_name)
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=hosts, www_redirect=False)
+    # スマホの画面から、名前のアドレスで開けるかを画像の読み込みで確かめるため、そのオリジンだけ許す
+    app.add_middleware(SecurityHeadersMiddleware, headers=security_headers(config.local_url))
     return app
 
 

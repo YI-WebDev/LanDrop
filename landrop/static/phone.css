@@ -82,6 +82,25 @@ main {
   margin-top: var(--space-3);
 }
 
+.home-tip {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+  padding: var(--space-4);
+  margin-bottom: var(--space-5);
+}
+
+.home-tip-text {
+  flex: 1;
+  min-width: 0;
+  display: grid;
+  gap: var(--space-1);
+}
+
+.home-tip h2 {
+  font-size: var(--text-md);
+}
+
 main > .notice {
   margin-top: 28px;
 }
