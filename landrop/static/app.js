@@ -1,4 +1,3 @@
-// LanDrop スマホ側の画面の動作（ビルド工程なしの素のJavaScript。先に common.js を読み込む）
 "use strict";
 
 const STATUS_LABELS = {
@@ -8,17 +7,15 @@ const STATUS_LABELS = {
   failed: "失敗",
 };
 
-// デザインシステムのバッジの色（ui.css の data-tone）
-const STATUS_TONES = {
+const BADGE_TONE_BY_STATUS = {
   uploading: "primary",
   done: "success",
   failed: "danger",
 };
 
-// 一覧の自動更新の間隔。自動更新は「操作」に数えないので、開いたままでも自動停止は効く
 const AUTO_REFRESH_MS = 4000;
-// 名前のアドレス（landrop-xxx.local）で開けるか確かめるときに待つ時間
-const LOCAL_PROBE_MS = 2500;
+const LOCAL_NAME_PROBE_TIMEOUT_MS = 2500;
+const PUBLIC_PROBE_IMAGE_PATH = "/static/icon.svg";
 const HOME_TIP_KEY = "landrop.home-tip-closed";
 const HOP_TRIED_KEY = "landrop.local-hop-tried";
 
@@ -31,16 +28,12 @@ const state = {
   filesSignature: "",
 };
 
-// 表示用の整形と要素の作成は common.js を使う
-
 class SessionExpired extends Error {}
-
-// ---------- サーバーとの通信 ----------
 
 async function getJSON(path, auto = false) {
   let response;
   try {
-    const headers = auto ? { "X-LanDrop-Auto": "1" } : {};
+    const headers = auto ? NOT_USER_ACTIVITY_HEADERS : {};
     response = await fetch(path, { cache: "no-store", credentials: "same-origin", headers });
   } catch {
     setOnline(false);
@@ -66,8 +59,8 @@ async function loadInfo() {
   try {
     const info = await getJSON("/api/info");
     $("pc-name").textContent = info.pc_name;
-    // 実際に開いているアドレス（名前のアドレスで開いていれば、そちら）を表示する
-    $("address").textContent = `http://${location.host}`;
+    const addressInUse = `http://${location.host}`;
+    $("address").textContent = addressInUse;
     state.maxSize = info.max_size;
     $("max-size").textContent = ` ${formatSize(info.max_size)} `;
     if (info.remembered) await offerHomeScreen(info);
@@ -77,8 +70,6 @@ async function loadInfo() {
   }
 }
 
-// ---------- 2回目からQRコードなしで開く ----------
-
 function storageGet(storage, key) {
   try {
     return storage.getItem(key);
@@ -87,22 +78,21 @@ function storageGet(storage, key) {
   }
 }
 
-function storageSet(storage, key) {
+function tryStoreFlag(storage, key) {
   try {
     storage.setItem(key, "1");
   } catch {
-    // 保存できなくても、案内がもう一度出るだけ
+    return;
   }
 }
 
-// 名前のアドレスがこのスマホから引けるか、公開されている画像の読み込みで確かめる
 function canReach(origin) {
   return new Promise((resolve) => {
     const image = new Image();
     const timer = setTimeout(() => {
       image.src = "";
       resolve(false);
-    }, LOCAL_PROBE_MS);
+    }, LOCAL_NAME_PROBE_TIMEOUT_MS);
     image.onload = () => {
       clearTimeout(timer);
       resolve(true);
@@ -111,17 +101,17 @@ function canReach(origin) {
       clearTimeout(timer);
       resolve(false);
     };
-    image.src = `${origin}/static/icon.svg?probe=${Date.now()}`;
+    image.src = `${origin}${PUBLIC_PROBE_IMAGE_PATH}?probe=${Date.now()}`;
   });
 }
 
 async function offerHomeScreen(info) {
   const local = info.local_url ? new URL(info.local_url) : null;
   const onLocal = local !== null && location.host === local.host;
-  // IPアドレスで開いていて名前のアドレスが使えるなら、IPアドレスが変わっても開ける名前のアドレスへ移る。
-  // 移れなかったときに繰り返さないよう、このタブで試すのは一度だけ
-  if (local && !onLocal && !storageGet(sessionStorage, HOP_TRIED_KEY) && state.queue.length === 0) {
-    storageSet(sessionStorage, HOP_TRIED_KEY);
+  const shouldHopToLocalNameOnce =
+    local && !onLocal && !storageGet(sessionStorage, HOP_TRIED_KEY) && state.queue.length === 0;
+  if (shouldHopToLocalNameOnce) {
+    tryStoreFlag(sessionStorage, HOP_TRIED_KEY);
     if (await canReach(local.origin)) {
       try {
         const response = await fetch("/api/handoff", { method: "POST", credentials: "same-origin" });
@@ -133,16 +123,18 @@ async function offerHomeScreen(info) {
           }
         }
       } catch {
-        // 移れなければ、このままIPアドレスで使う
+        return showHomeTipUnlessClosed(onLocal);
       }
     }
   }
+  return showHomeTipUnlessClosed(onLocal);
+}
+
+function showHomeTipUnlessClosed(onLocal) {
   if (storageGet(localStorage, HOME_TIP_KEY)) return;
   $("home-tip-ip").hidden = onLocal;
   $("home-tip").hidden = false;
 }
-
-// ---------- PC → スマホ ----------
 
 async function loadFiles({ auto = false } = {}) {
   if (state.loadingFiles) return;
@@ -157,8 +149,9 @@ async function loadFiles({ auto = false } = {}) {
   try {
     const { files } = await getJSON("/api/files", auto);
     const signature = JSON.stringify(files);
-    // 自動更新では、変化がなければ描き直さない（スクロール位置や押しかけた操作を保つ）
-    if (!auto || signature !== state.filesSignature || status.classList.contains("is-error")) {
+    const canSkipRedraw =
+      auto && signature === state.filesSignature && !status.classList.contains("is-error");
+    if (!canSkipRedraw) {
       status.classList.remove("is-error");
       state.filesSignature = signature;
       renderFiles(files);
@@ -191,12 +184,8 @@ function renderFiles(files) {
     status.textContent = "";
     const empty = el("li", "empty");
     empty.append(el("strong", "", "共有するファイルがありません"));
-    empty.append(
-      // --share で場所を変えられるため、フォルダ名ではなくPCの画面での操作を案内する
-      document.createTextNode(
-        "PCのLanDropの画面にファイルをドロップすると、ここに表示されます。"
-      )
-    );
+    const emptyShareGuidance = "PCのLanDropの画面にファイルをドロップすると、ここに表示されます。";
+    empty.append(document.createTextNode(emptyShareGuidance));
     list.append(empty);
     return;
   }
@@ -220,8 +209,6 @@ function renderFiles(files) {
   }
 }
 
-// ---------- スマホ → PC ----------
-
 function addFiles(fileList) {
   for (const file of fileList) {
     const item = { id: state.nextId++, file, status: "waiting", loaded: 0, message: "", retryable: true };
@@ -236,7 +223,7 @@ function addFiles(fileList) {
     renderItem(item);
   }
   renderSummary();
-  pump();
+  uploadWaitingItemsOneAtATime();
 }
 
 function createItemNode(item) {
@@ -257,7 +244,7 @@ function createItemNode(item) {
     item.message = "";
     renderItem(item);
     renderSummary();
-    pump();
+    uploadWaitingItemsOneAtATime();
   });
   const progress = el("div", "progress");
   const bar = el("div", "progress-bar");
@@ -271,7 +258,7 @@ function renderItem(item) {
   const size = item.file.size;
   root.dataset.status = item.status;
   status.textContent = STATUS_LABELS[item.status];
-  if (STATUS_TONES[item.status]) status.dataset.tone = STATUS_TONES[item.status];
+  if (BADGE_TONE_BY_STATUS[item.status]) status.dataset.tone = BADGE_TONE_BY_STATUS[item.status];
   else delete status.dataset.tone;
   retry.hidden = !(item.status === "failed" && item.retryable);
   let ratio = 0;
@@ -287,8 +274,7 @@ function renderItem(item) {
   } else {
     meta.textContent = formatSize(size);
   }
-  // CSPで style 属性を禁止しているため、CSSOM で幅を変える
-  bar.style.transform = `scaleX(${Math.min(ratio, 1)})`;
+  setProgressBarRatio(bar, ratio);
 }
 
 function renderSummary() {
@@ -307,8 +293,7 @@ function renderSummary() {
   $("clear-done").hidden = counts.done === 0;
 }
 
-// 1ファイルずつ順番に送る
-async function pump() {
+async function uploadWaitingItemsOneAtATime() {
   if (state.running) return;
   state.running = true;
   try {
@@ -347,12 +332,7 @@ function upload(item) {
       renderItem(item);
     });
     xhr.addEventListener("load", () => {
-      let body = {};
-      try {
-        body = JSON.parse(xhr.responseText);
-      } catch {
-        // 応答が JSON でなければ、ステータスコードだけで判断する
-      }
+      const body = parseJsonOrEmpty(xhr.responseText);
       if (xhr.status === 201) {
         item.loaded = item.file.size;
         const saved = body.name && body.name !== item.file.name ? `「${body.name}」として` : "";
@@ -384,8 +364,6 @@ function clearDone() {
   renderSummary();
 }
 
-// ---------- タブの切り替え ----------
-
 function selectTab(name) {
   for (const tab of ["receive", "send"]) {
     const selected = tab === name;
@@ -396,8 +374,6 @@ function selectTab(name) {
   window.scrollTo({ top: 0 });
 }
 
-// ---------- 初期化 ----------
-
 document.addEventListener("DOMContentLoaded", () => {
   $("tab-receive").addEventListener("click", () => selectTab("receive"));
   $("tab-send").addEventListener("click", () => selectTab("send"));
@@ -405,12 +381,11 @@ document.addEventListener("DOMContentLoaded", () => {
   $("clear-done").addEventListener("click", clearDone);
   $("home-tip-close").addEventListener("click", () => {
     $("home-tip").hidden = true;
-    storageSet(localStorage, HOME_TIP_KEY);
+    tryStoreFlag(localStorage, HOME_TIP_KEY);
   });
   $("file-input").addEventListener("change", (event) => {
     addFiles(Array.from(event.target.files));
-    // 同じファイルをもう一度選べるようにする
-    event.target.value = "";
+    clearFileInput(event.target);
   });
   window.addEventListener("beforeunload", (event) => {
     if (state.queue.some((item) => item.status === "waiting" || item.status === "uploading")) {

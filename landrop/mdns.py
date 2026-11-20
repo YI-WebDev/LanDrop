@@ -1,8 +1,3 @@
-"""LAN内に「landrop-<PC名>.local」という名前を流し、IPアドレスが変わっても同じアドレスで開けるようにする。
-
-名前の解決（mDNS）に答えるのは、LanDropが動いている間だけ。答えられなくても、IPアドレスでは使える。
-"""
-
 from __future__ import annotations
 
 import logging
@@ -16,7 +11,6 @@ _MAX_LABEL = 40
 
 
 def local_name(pc_name: str) -> str:
-    """PC名から、スマホのブラウザで使える名前（例: landrop-my-pc.local）を作る。PCごとに毎回同じ名前になる。"""
     ascii_name = unicodedata.normalize("NFKD", pc_name).encode("ascii", "ignore").decode("ascii").lower()
     label = re.sub(r"[^a-z0-9]+", "-", ascii_name).strip("-")
     label = f"landrop-{label}" if label else "landrop"
@@ -24,8 +18,6 @@ def local_name(pc_name: str) -> str:
 
 
 class Advertiser:
-    """名前の告知。起動を待たせないよう、登録は別のスレッドで行う。"""
-
     def __init__(self, name: str, ip: str, port: int) -> None:
         self.name = name
         self._ip = ip
@@ -62,9 +54,8 @@ class Advertiser:
             server=self.name + ".",
         )
         try:
-            # 同じLANで別のLanDropが動いていれば、サービス名は自動で変わる。ホスト名はPCごとに違う
             zc.register_service(info, allow_name_change=True)
-        except Exception as e:  # noqa: BLE001  告知できなくても、IPアドレスでは使える
+        except Exception as e:  # noqa: BLE001
             _log.warning("%s の名前を告知できませんでした: %s", self.name, e)
 
     def close(self) -> None:
@@ -74,5 +65,5 @@ class Advertiser:
         if zc is not None:
             try:
                 zc.close()
-            except Exception:  # noqa: BLE001  終了時なので、片付けに失敗しても続ける
+            except Exception:  # noqa: BLE001
                 pass

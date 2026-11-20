@@ -1,5 +1,3 @@
-"""PCのデスクトップとの連携（アプリ用のウィンドウを開く）。"""
-
 from __future__ import annotations
 
 import sys
@@ -54,8 +52,6 @@ def test_reveal_quotes_the_path(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 class _FakeWebview(types.ModuleType):
-    """pywebview の代わり。開いたウィンドウと、閉じた回数を覚える。"""
-
     def __init__(self, fail: bool = False) -> None:
         super().__init__("webview")
         self.fail = fail
@@ -74,19 +70,19 @@ class _FakeWebview(types.ModuleType):
             raise RuntimeError("WebView2 がない")
 
 
-def test_run_window_opens_webview2(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_show_window_until_closed_uses_webview2(monkeypatch: pytest.MonkeyPatch) -> None:
     fake = _FakeWebview()
     monkeypatch.setitem(sys.modules, "webview", fake)
 
-    assert desktop.run_window(URL) is True
+    assert desktop.show_window_until_closed(URL) is True
     assert [(w.title, w.url) for w in fake.windows] == [("LanDrop", URL)]
     assert fake.started_with == ["edgechromium"]
 
 
-def test_run_window_reports_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_show_window_until_closed_reports_start_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setitem(sys.modules, "webview", _FakeWebview(fail=True))
 
-    assert desktop.run_window(URL) is False
+    assert desktop.show_window_until_closed(URL) is False
 
 
 def test_close_window_destroys_open_windows(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -104,4 +100,4 @@ def test_window_needs_pywebview(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(desktop.importlib.util, "find_spec", lambda name: None)
 
     assert desktop.window_available() is False
-    desktop.close_window()  # 何もしない
+    desktop.close_window()

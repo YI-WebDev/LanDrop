@@ -1,5 +1,3 @@
-"""PCの画面（このPCの 127.0.0.1 からだけ使える画面とAPI）。"""
-
 from __future__ import annotations
 
 import asyncio
@@ -18,6 +16,8 @@ from tests.conftest import BASE_URL, PORT, TOKEN
 PC_TOKEN = "pc-token-1234567890"
 PC_SESSION_KEY = "pc-session-key"
 LOCAL_URL = f"http://127.0.0.1:{PORT}"
+ONE_ACTIVE_PHONE_DOWNLOAD = 1
+STOP_CLOSES_CONNECTION_SECONDS = 2
 LOCAL_ORIGIN = {"Origin": LOCAL_URL}
 
 PcFactory = Callable[..., tuple[TestClient, AppConfig]]
@@ -28,7 +28,7 @@ def make_pc(make_config: Callable[..., AppConfig]) -> Iterator[PcFactory]:
     clients: list[TestClient] = []
 
     def factory(authenticated: bool = True, **overrides: object) -> tuple[TestClient, AppConfig]:
-        config = make_config(pc_token=PC_TOKEN, pc_session_key=PC_SESSION_KEY, **overrides)
+        config = make_config(pc_url_token=PC_TOKEN, pc_cookie_secret=PC_SESSION_KEY, **overrides)
         client = TestClient(create_app(config), base_url=LOCAL_URL, client=("127.0.0.1", 50000))
         clients.append(client)
         if authenticated:
@@ -52,9 +52,6 @@ def _wait_until(condition: Callable[[], bool], seconds: float = 2.0) -> bool:
             return True
         time.sleep(0.02)
     return condition()
-
-
-# ---------- 認証と、ほかの機器からの遮断 ----------
 
 
 def test_pc_auth_sets_strict_cookie_and_redirects(make_pc: PcFactory) -> None:
@@ -93,9 +90,11 @@ def test_pc_requires_its_own_cookie(make_pc: PcFactory, share_dir: Path) -> None
 
 
 def test_pc_is_not_reachable_from_other_devices(make_config: Callable[..., AppConfig]) -> None:
-    config = make_config(pc_token=PC_TOKEN, pc_session_key=PC_SESSION_KEY)
-    # スマホなど、LANのアドレスで待ち受けているソケットからの接続
-    with TestClient(create_app(config), base_url=BASE_URL, client=("192.168.1.20", 50000)) as lan:
+    config = make_config(pc_url_token=PC_TOKEN, pc_cookie_secret=PC_SESSION_KEY)
+    lan_client = ("192.168.1.20", 50000)
+    with TestClient(
+        create_app(config), base_url=BASE_URL, client=lan_client
+    ) as lan:
         lan.cookies.set("landrop_pc", PC_SESSION_KEY)
         for path in (f"/pc/auth?t={PC_TOKEN}", "/pc", "/pc/api/status", "/pc/qr.svg"):
             response = lan.get(path, follow_redirects=False)
@@ -107,15 +106,10 @@ def test_phone_and_pc_cookies_are_separate(make_pc: PcFactory) -> None:
     client, _ = make_pc(authenticated=False)
     assert client.get(f"/auth?t={TOKEN}").status_code == 200
 
-    # スマホ用のCookieではPCの画面を使えない
-    assert client.get("/pc/api/status").status_code == 401
+    assert client.get("/pc/api/status").status_code == 401, "phone cookie rejected by pc"
 
     other, _ = make_pc()
-    # PCの画面のCookieでは、スマホ用のAPIを使えない
-    assert other.get("/api/files").status_code == 401
-
-
-# ---------- 表示 ----------
+    assert other.get("/api/files").status_code == 401, "pc cookie rejected by phone api"
 
 
 def test_status_contains_phone_url_and_folders(make_pc: PcFactory) -> None:
@@ -157,9 +151,6 @@ def test_lists_both_folders_with_preview_flag(pc: TestClient, share_dir: Path, r
     assert pc.get("/pc/api/files/other").status_code == 404
 
 
-# ---------- 共有フォルダへの追加 ----------
-
-
 def test_files_added_on_pc_are_shared_with_the_phone(
     make_pc: PcFactory, make_client: Callable[..., TestClient], share_dir: Path
 ) -> None:
@@ -183,9 +174,6 @@ def test_adding_files_from_other_sites_is_rejected(pc: TestClient, share_dir: Pa
     assert list(share_dir.iterdir()) == []
 
 
-# ---------- 画像と動画の表示 ----------
-
-
 def test_preview_is_inline_and_sandboxed(pc: TestClient, received_dir: Path) -> None:
     (received_dir / "写真.png").write_bytes(b"\x89PNG")
 
@@ -205,9 +193,6 @@ def test_preview_refuses_other_types_and_paths(pc: TestClient, received_dir: Pat
     (received_dir.parent / "secret.png").write_bytes(b"secret")
 
     assert pc.get(f"/pc/preview/received/{name}").status_code == 404
-
-
-# ---------- エクスプローラーで表示・フォルダを開く ----------
 
 
 def test_reveal_and_open_folder_use_only_listed_files(
@@ -232,9 +217,6 @@ def test_reveal_and_open_folder_use_only_listed_files(
     assert revealed == [received_dir / "写真.jpg"]
     assert (folder.status_code, bad_folder.status_code) == (204, 404)
     assert len(opened) == 1
-
-
-# ---------- 停止 ----------
 
 
 def test_stop_button_requests_stop(make_pc: PcFactory) -> None:
@@ -267,8 +249,9 @@ def _local_scope(path: str) -> dict:
     }
 
 
-async def _window(app: Callable, opened: asyncio.Event, close: asyncio.Event) -> None:
-    """PCの画面1つ分の、つなぎっぱなしの接続。close がセットされたら切断する。"""
+async def _pc_screen_connection(
+    app: Callable, opened: asyncio.Event, close: asyncio.Event
+) -> None:
     first = True
 
     async def receive() -> dict:
@@ -287,16 +270,16 @@ async def _window(app: Callable, opened: asyncio.Event, close: asyncio.Event) ->
 
 
 def _pc_config(make_config: Callable[..., AppConfig], **overrides: object) -> AppConfig:
-    return make_config(pc_token=PC_TOKEN, pc_session_key=PC_SESSION_KEY, **overrides)
+    return make_config(pc_url_token=PC_TOKEN, pc_cookie_secret=PC_SESSION_KEY, **overrides)
 
 
 def test_closing_the_last_window_stops(make_config: Callable[..., AppConfig]) -> None:
-    config = _pc_config(make_config, close_grace_seconds=0.05)
+    config = _pc_config(make_config, pc_window_close_grace_seconds=0.05)
     app = create_app(config)
 
     async def run() -> None:
         opened, close = asyncio.Event(), asyncio.Event()
-        window = asyncio.create_task(_window(app, opened, close))
+        window = asyncio.create_task(_pc_screen_connection(app, opened, close))
         await opened.wait()
         close.set()
         await window
@@ -308,22 +291,21 @@ def test_closing_the_last_window_stops(make_config: Callable[..., AppConfig]) ->
 
 
 def test_reloading_the_window_does_not_stop(make_config: Callable[..., AppConfig]) -> None:
-    config = _pc_config(make_config, close_grace_seconds=0.1)
+    config = _pc_config(make_config, pc_window_close_grace_seconds=0.1)
     app = create_app(config)
 
     async def run() -> None:
         before = (asyncio.Event(), asyncio.Event())
-        task = asyncio.create_task(_window(app, *before))
+        task = asyncio.create_task(_pc_screen_connection(app, *before))
         await before[0].wait()
         before[1].set()
         await task
-        # 再読み込みで開き直された画面
-        after = (asyncio.Event(), asyncio.Event())
-        task = asyncio.create_task(_window(app, *after))
-        await after[0].wait()
+        window_reopened_by_reload = (asyncio.Event(), asyncio.Event())
+        task = asyncio.create_task(_pc_screen_connection(app, *window_reopened_by_reload))
+        await window_reopened_by_reload[0].wait()
         await asyncio.sleep(0.4)
         assert config.stop.reason is None
-        after[1].set()
+        window_reopened_by_reload[1].set()
         await task
 
     asyncio.run(run())
@@ -332,13 +314,13 @@ def test_reloading_the_window_does_not_stop(make_config: Callable[..., AppConfig
 
 
 def test_closing_waits_for_transfers(make_config: Callable[..., AppConfig]) -> None:
-    config = _pc_config(make_config, close_grace_seconds=0.05)
+    config = _pc_config(make_config, pc_window_close_grace_seconds=0.05)
     app = create_app(config)
-    config.tracker.active_requests = 1  # スマホがダウンロード中
+    config.tracker.active_requests = ONE_ACTIVE_PHONE_DOWNLOAD
 
     async def run() -> None:
         opened, close = asyncio.Event(), asyncio.Event()
-        window = asyncio.create_task(_window(app, opened, close))
+        window = asyncio.create_task(_pc_screen_connection(app, opened, close))
         await opened.wait()
         close.set()
         await window
@@ -357,11 +339,10 @@ def test_stop_ends_the_window_connection(make_config: Callable[..., AppConfig]) 
 
     async def run() -> None:
         opened, close = asyncio.Event(), asyncio.Event()
-        window = asyncio.create_task(_window(app, opened, close))
+        window = asyncio.create_task(_pc_screen_connection(app, opened, close))
         await opened.wait()
         config.stop.request("PCの画面から停止しました。")
-        # サーバーの終了を待たせないよう、こちらから接続を終える
-        await asyncio.wait_for(window, timeout=2)
+        await asyncio.wait_for(window, timeout=STOP_CLOSES_CONNECTION_SECONDS)
 
     asyncio.run(run())
 
@@ -383,17 +364,16 @@ def test_window_connection_is_not_reachable_from_other_devices(make_config: Call
 
 
 def test_status_includes_startup_notices(make_pc: PcFactory) -> None:
-    client, _ = make_pc(notices=("「Wi-Fi」は「パブリック ネットワーク」に設定されています。",))
+    client, _ = make_pc(startup_notices=("「Wi-Fi」は「パブリック ネットワーク」に設定されています。",))
 
     assert client.get("/pc/api/status").json()["notices"] == ["「Wi-Fi」は「パブリック ネットワーク」に設定されています。"]
 
 
-def test_closing_the_app_window_stops_after_transfers(make_config: Callable[..., AppConfig]) -> None:
-    config = _pc_config(make_config, close_grace_seconds=0.05)
+def test_closing_app_window_waits_for_transfers_then_stops(make_config: Callable[..., AppConfig]) -> None:
+    config = _pc_config(make_config, pc_window_close_grace_seconds=0.05)
     app = create_app(config)
-    config.tracker.active_requests = 1  # スマホがダウンロード中
+    config.tracker.active_requests = ONE_ACTIVE_PHONE_DOWNLOAD
 
-    # LanDrop自身のウィンドウが閉じられた（つなぎっぱなしの接続の有無は問わない）
     app.state.pc_window_closed()
     time.sleep(0.3)
     assert config.stop.reason is None

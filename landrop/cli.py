@@ -1,5 +1,3 @@
-"""起動オプションの解析と、サーバーの起動。"""
-
 from __future__ import annotations
 
 import argparse
@@ -29,20 +27,22 @@ DEFAULT_SHARE = Path.home() / "LanDrop" / "share"
 DEFAULT_RECEIVED = Path.home() / "LanDrop" / "received"
 DEFAULT_MAX_SIZE = "10GB"
 DEFAULT_TIMEOUT_MINUTES = 30.0
-# 画面のないアプリとして起動したときに、ターミナルへの表示の代わりに書き出すファイル
-LOG_FILE = Path.home() / "LanDrop" / "LanDrop.log"
-# 一度接続したスマホの一覧（鍵はハッシュだけを保存する）
-DEVICES_FILE = Path.home() / "LanDrop" / "devices.json"
-# 前回使ったポート。同じポートで起動すれば、スマホのホーム画面のアドレスがそのまま使える
-STATE_FILE = Path.home() / "LanDrop" / "state.json"
-_WATCH_SECONDS = 0.5
-# ダブルクリックで起動したアプリのように、表示先のターミナルがないか
-_windowless = False
+WINDOWLESS_APP_OUTPUT_LOG_FILE = Path.home() / "LanDrop" / "LanDrop.log"
+REMEMBERED_DEVICES_FILE = Path.home() / "LanDrop" / "devices.json"
+LAST_PORT_STATE_FILE = Path.home() / "LanDrop" / "state.json"
+_STOP_AND_IDLE_POLL_SECONDS = 0.5
+_JOIN_POLL_SECONDS = 0.5
+_launched_without_terminal = False
 _SIZE_UNITS = {"": 1, "K": 1024, "M": 1024**2, "G": 1024**3, "T": 1024**4}
+_ACCESS_LOG_EXPOSING_QR_TOKENS = False
+_GRACEFUL_SHUTDOWN_SECONDS = 5
+_LOOPBACK_IP = "127.0.0.1"
+_PROGRESS_LINE_PREFIX = "ネットワークを確認"
+_STD_OUTPUT_HANDLE = -11
+_ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004
 
 
 def parse_size(text: str) -> int:
-    """「10GB」「500MB」「1024」のような指定をバイト数にする（1KB = 1024バイト）。"""
     match = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*([KMGT]?)(?:i?B)?\s*", text, re.IGNORECASE)
     if not match:
         raise argparse.ArgumentTypeError("サイズは 10GB、500MB、1024 のように指定してください。")
@@ -122,7 +122,6 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _command() -> str:
-    """案内に表示する起動コマンド。"""
     if getattr(sys, "frozen", False):
         return "LanDrop.exe" if os.name == "nt" else "LanDrop"
     return "python -m landrop"
@@ -142,17 +141,17 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _keep_error_visible() -> None:
-    """ターミナルのないアプリとして起動したときは、起動できなかった理由をダイアログで知らせる。"""
-    if not _windowless:
+    if not _launched_without_terminal:
         return
     sys.stdout.flush()
     try:
-        lines = [line.strip() for line in LOG_FILE.read_text(encoding="utf-8").splitlines()]
+        lines = [line.strip() for line in WINDOWLESS_APP_OUTPUT_LOG_FILE.read_text(encoding="utf-8").splitlines()]
     except OSError:
         lines = []
-    # 最初の「ネットワークを確認しています...」は理由ではないので省く
-    reason = "\n".join(line for line in lines if line and not line.startswith("ネットワークを確認"))
-    desktop.alert("LanDrop を起動できませんでした", f"{reason}\n\n（記録: {LOG_FILE}）")
+    reason = "\n".join(
+        line for line in lines if line and not line.startswith(_PROGRESS_LINE_PREFIX)
+    )
+    desktop.alert("LanDrop を起動できませんでした", f"{reason}\n\n（記録: {WINDOWLESS_APP_OUTPUT_LOG_FILE}）")
 
 
 def _run(args: argparse.Namespace) -> int:
@@ -171,7 +170,6 @@ def _run(args: argparse.Namespace) -> int:
 
     print("ネットワークを確認しています...", flush=True)
     interfaces, detailed = network.find_interfaces()
-    # 起動時の注意。ターミナルとPCの画面の両方に表示する
     notices: list[str] = []
     ip = _validate_ip(args.ip, interfaces, notices) if args.ip else _select_ip(interfaces, detailed, notices)
     if ip is None:
@@ -194,8 +192,8 @@ def _run(args: argparse.Namespace) -> int:
         )
     _remember_port(requested_port, sock.getsockname()[1])
     pc_sock = _bind_pc_socket(ip, sock)
-    if pc_sock is None and _windowless:
-        # ターミナルもPCの画面もないと、QRコードを見せる場所がない
+    nowhere_to_show_the_qr_code = pc_sock is None and _launched_without_terminal
+    if nowhere_to_show_the_qr_code:
         sock.close()
         return 1
     notices += _profile_warnings(ip, interfaces, detailed)
@@ -203,13 +201,16 @@ def _run(args: argparse.Namespace) -> int:
     tracker = IdleTracker(args.timeout * 60)
     if args.forget_devices:
         try:
-            DEVICES_FILE.unlink(missing_ok=True)
+            REMEMBERED_DEVICES_FILE.unlink(missing_ok=True)
         except OSError as e:
             notices.append(f"覚えているスマホの一覧を消せませんでした: {e}")
     pc_name = socket.gethostname()
     is_loopback = ipaddress.IPv4Address(ip).is_loopback
-    # ループバックではスマホから届かないので、名前も告知しない
-    advertiser = None if is_loopback else mdns.Advertiser(mdns.local_name(pc_name), ip, sock.getsockname()[1])
+    advertiser = (
+        None
+        if is_loopback
+        else mdns.Advertiser(mdns.local_name(pc_name), ip, sock.getsockname()[1])
+    )
     config = AppConfig(
         share_dir=share_dir,
         received_dir=received_dir,
@@ -218,30 +219,36 @@ def _run(args: argparse.Namespace) -> int:
         max_size=args.max_size,
         pc_name=pc_name,
         tracker=tracker,
-        notices=tuple(notices),
-        devices=DeviceStore(DEVICES_FILE),
+        startup_notices=tuple(notices),
+        devices=DeviceStore(REMEMBERED_DEVICES_FILE),
         local_name=advertiser.name if advertiser else None,
     )
     app = create_app(config)
-    pc_url = f"http://127.0.0.1:{pc_sock.getsockname()[1]}{PC_AUTH_PATH}?t={config.pc_token}" if pc_sock else None
+    pc_url = (
+        f"http://{_LOOPBACK_IP}:{pc_sock.getsockname()[1]}"
+        f"{PC_AUTH_PATH}?t={config.pc_url_token}"
+        if pc_sock
+        else None
+    )
     _print_banner(config, args.timeout, pc_url, args.no_open)
 
     uvicorn_config = uvicorn.Config(
         app,
         host=ip,
         port=config.port,
-        # アクセスログにはQRコードのURL（トークン）が残るため出力しない
-        access_log=False,
+        access_log=_ACCESS_LOG_EXPOSING_QR_TOKENS,
         log_level="warning",
         server_header=False,
-        # 停止時に転送中の接続を待ち続けないようにする（.part は削除される）
-        timeout_graceful_shutdown=5,
+        timeout_graceful_shutdown=_GRACEFUL_SHUTDOWN_SECONDS,
     )
-    # Config の作成時にUvicornがログを設定し直すため、フィルターはその後で付ける
-    logging.getLogger("uvicorn.error").addFilter(_InvalidRequestNotice())
+    _install_invalid_request_notice()
     server = uvicorn.Server(uvicorn_config)
     finished = threading.Event()
-    threading.Thread(target=_watch, args=(server, tracker, config.stop, finished, args.timeout), daemon=True).start()
+    threading.Thread(
+        target=_watch_for_stop,
+        args=(server, tracker, config.stop, finished, args.timeout),
+        daemon=True,
+    ).start()
     sockets = [sock] if pc_sock in (None, sock) else [sock, pc_sock]
     if advertiser:
         advertiser.start()
@@ -250,8 +257,7 @@ def _run(args: argparse.Namespace) -> int:
             _serve_with_window(server, sockets, pc_url, app.state.pc_window_closed)
         else:
             if pc_url and not args.no_open:
-                # ソケットはすでに待ち受けているので、サーバーの準備より先に開いてもつながる
-                desktop.open_app_window(pc_url)
+                _open_pc_screen(pc_url)
             server.run(sockets=sockets)
     except KeyboardInterrupt:
         pass
@@ -265,63 +271,69 @@ def _run(args: argparse.Namespace) -> int:
     return 0
 
 
+def _install_invalid_request_notice() -> None:
+    logging.getLogger("uvicorn.error").addFilter(_InvalidRequestNotice())
+
+
+def _open_pc_screen(pc_url: str) -> None:
+    desktop.open_app_window(pc_url)
+
+
 def _last_port() -> int | None:
     try:
-        port = json.loads(STATE_FILE.read_text(encoding="utf-8")).get("port")
+        port = json.loads(LAST_PORT_STATE_FILE.read_text(encoding="utf-8")).get("port")
     except (OSError, ValueError, AttributeError):
         return None
     return port if isinstance(port, int) and 1024 <= port <= 65535 else None
 
 
 def _remember_port(requested: int, actual: int) -> None:
-    """空きを探して別の番号になったときは覚えない。一時的に使われていただけなら、次は元の番号に戻れる。"""
-    if actual == requested:
-        _save_last_port(actual)
+    port_changed = actual != requested
+    if port_changed:
+        return
+    _save_last_port_if_possible(actual)
 
 
-def _save_last_port(port: int) -> None:
+def _save_last_port_if_possible(port: int) -> None:
     try:
-        STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-        STATE_FILE.write_text(json.dumps({"port": port}), encoding="utf-8")
+        LAST_PORT_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        LAST_PORT_STATE_FILE.write_text(json.dumps({"port": port}), encoding="utf-8")
     except OSError:
-        # 覚えられなくても、次は既定のポートから探すだけ
-        pass
+        return
 
 
 def _serve_with_window(
-    server: uvicorn.Server, sockets: list[socket.socket], pc_url: str, window_closed: Callable[[], None]
+    server: uvicorn.Server,
+    sockets: list[socket.socket],
+    pc_url: str,
+    on_window_closed: Callable[[], None],
 ) -> None:
-    """サーバーを別のスレッドで動かし、メインスレッドでLanDrop自身のウィンドウを開く。"""
-
     def serve() -> None:
         try:
             server.run(sockets=sockets)
         finally:
-            # 停止ボタンや自動停止で止まったときは、ウィンドウも閉じる
             desktop.close_window()
 
     thread = threading.Thread(target=serve, daemon=True)
     thread.start()
-    if desktop.run_window(pc_url):
-        # ウィンドウが閉じられた。転送中なら、終わってから止まる
-        window_closed()
+    window_was_shown = desktop.show_window_until_closed(pc_url)
+    if window_was_shown:
+        on_window_closed()
     else:
         desktop.open_app_window(pc_url)
     try:
-        # Ctrl+C を受け付けられるよう、少しずつ待つ
         while thread.is_alive():
-            thread.join(0.5)
+            thread.join(_JOIN_POLL_SECONDS)
     except KeyboardInterrupt:
         server.should_exit = True
         thread.join()
 
 
 def _bind_pc_socket(ip: str, lan_sock: socket.socket) -> socket.socket | None:
-    """PCの画面用に、このPCからだけ届く 127.0.0.1 で待ち受けるソケットを用意する。"""
     if ipaddress.IPv4Address(ip).is_loopback:
         return lan_sock
     try:
-        return network.bind_socket("127.0.0.1", lan_sock.getsockname()[1], search=True)
+        return network.bind_socket(_LOOPBACK_IP, lan_sock.getsockname()[1], search=True)
     except OSError as e:
         print(f"[注意] PCの画面を用意できませんでした（{e}）。")
         return None
@@ -343,6 +355,26 @@ def _validate_ip(text: str, interfaces: list[network.Interface], notices: list[s
     return str(addr)
 
 
+def _lan_candidates(interfaces: list[network.Interface]) -> list[network.Interface]:
+    return [
+        i
+        for i in network.sort_candidates(interfaces)
+        if not (ipaddress.IPv4Address(i.ip).is_loopback or ipaddress.IPv4Address(i.ip).is_link_local)
+    ]
+
+
+def _use_best_candidate(
+    candidates: list[network.Interface], notices: list[str]
+) -> str:
+    best, others = candidates[0], "、".join(i.ip for i in candidates[1:])
+    notices.append(
+        f"LANのアドレスを1つに決められなかったため、{best.ip}（{best.label}）を使っています。"
+        f"スマホから接続できないときは、ショートカットのリンク先の最後に「--ip {candidates[1].ip}」のように"
+        f"ほかの候補（{others}）を付けて起動し直してください。"
+    )
+    return best.ip
+
+
 def _select_ip(interfaces: list[network.Interface], detailed: bool, notices: list[str]) -> str | None:
     chosen = network.choose_interface(interfaces, network.default_route_ip())
     if chosen is not None:
@@ -350,26 +382,16 @@ def _select_ip(interfaces: list[network.Interface], detailed: bool, notices: lis
             notices.append(f"アダプターの情報を取得できなかったため {chosen.ip} を使います。違う場合は --ip で指定してください。")
         return chosen.ip
 
-    # スマホから届くことのないループバックとリンクローカルは選択肢に出さない
-    candidates = [
-        i
-        for i in network.sort_candidates(interfaces)
-        if not (ipaddress.IPv4Address(i.ip).is_loopback or ipaddress.IPv4Address(i.ip).is_link_local)
-    ]
+    candidates = _lan_candidates(interfaces)
     if not candidates:
         print("LANのIPv4アドレスが見つかりませんでした。")
         print("Wi-Fiや有線LANにつながっているか確認するか、--ip でアドレスを指定してください。")
         return None
 
-    if _windowless:
-        # 番号を入力してもらえないため、いちばん有力な候補を使い、ほかの候補はPCの画面で知らせる
-        best, others = candidates[0], "、".join(i.ip for i in candidates[1:])
-        notices.append(
-            f"LANのアドレスを1つに決められなかったため、{best.ip}（{best.label}）を使っています。"
-            f"スマホから接続できないときは、ショートカットのリンク先の最後に「--ip {candidates[1].ip}」のように"
-            f"ほかの候補（{others}）を付けて起動し直してください。"
+    if _launched_without_terminal:
+        return _use_best_candidate(
+            candidates, notices
         )
-        return best.ip
 
     print("\nLANのIPアドレスを1つに確定できませんでした。スマホと同じネットワークのものを選んでください。")
     for number, iface in enumerate(candidates, 1):
@@ -392,13 +414,12 @@ def _select_ip(interfaces: list[network.Interface], detailed: bool, notices: lis
 
 
 def _profile_warnings(ip: str, interfaces: list[network.Interface], detailed: bool) -> list[str]:
-    """Windowsで、接続中のネットワークが「パブリック」になっていれば警告する。"""
     if os.name != "nt" or ipaddress.IPv4Address(ip).is_loopback:
         return []
     match = next((i for i in interfaces if i.ip == ip), None)
-    if not detailed or match is None or not match.category:
+    if not detailed or match is None or not match.windows_network_category:
         return ["ネットワークの種類（パブリック/プライベート）を確認できませんでした。"]
-    if match.category != "Public":
+    if match.windows_network_category != "Public":
         return []
     return [
         f"「{match.name}」は「パブリック ネットワーク」に設定されているため、Windowsのファイアウォールにより"
@@ -423,10 +444,10 @@ def _print_banner(config: AppConfig, timeout: float, pc_url: str | None, no_open
     print("  LanDrop を起動しました")
     print("=" * 64)
     for label, value in rows:
-        print(f"  {_pad(label, 14)}{value}")
+        print(f"  {_pad_to_display_width(label, 14)}{value}")
     print()
 
-    qr = render_qr(config.access_url, color=_enable_ansi())
+    qr = render_qr(config.access_url, color=_ansi_colors_available())
     if _can_print(qr):
         print("  スマホのカメラで、次のQRコードを読み取ってください。\n")
         print(qr)
@@ -452,7 +473,7 @@ def _print_banner(config: AppConfig, timeout: float, pc_url: str | None, no_open
 
     notices = [
         "通信は暗号化されません（HTTP）。公共Wi-Fi・ホテル・カフェなど、知らない人と共有するネットワークでは使わないでください。",
-        *config.notices,
+        *config.startup_notices,
     ]
     for notice in notices:
         print(f"  [注意] {notice}")
@@ -468,13 +489,9 @@ def _print_banner(config: AppConfig, timeout: float, pc_url: str | None, no_open
 
 
 class _InvalidRequestNotice(logging.Filter):
-    """HTTPとして読めない接続についてのUvicornの英語の警告を、日本語のお知らせ1回に置き換える。
-
-    ブラウザが http:// のアドレスをまず https:// で開こうとすると、TLSの接続要求が届いてこの警告が出る。
-    ブラウザはその後HTTPで接続し直すことが多く、接続のたびに繰り返し表示されると紛らわしい。
-    """
-
-    _MESSAGE = "Invalid HTTP request received."
+    _MESSAGE = (
+        "Invalid HTTP request received."
+    )
 
     def __init__(self) -> None:
         super().__init__()
@@ -492,11 +509,10 @@ class _InvalidRequestNotice(logging.Filter):
         return False
 
 
-def _watch(
+def _watch_for_stop(
     server: uvicorn.Server, tracker: IdleTracker, stop: StopRequest, finished: threading.Event, minutes: float
 ) -> None:
-    """無操作による自動停止と、PCの画面からの停止の依頼を見張る。"""
-    while not finished.wait(_WATCH_SECONDS):
+    while not finished.wait(_STOP_AND_IDLE_POLL_SECONDS):
         if stop.reason:
             message = stop.reason
         elif tracker.is_expired():
@@ -508,20 +524,25 @@ def _watch(
         return
 
 
-def _pad(text: str, width: int) -> str:
-    """全角文字を2文字分として、表示幅をそろえる。"""
+def _pad_to_display_width(text: str, width: int) -> str:
     used = sum(2 if unicodedata.east_asian_width(c) in "WF" else 1 for c in text)
     return text + " " * max(width - used, 1)
 
 
 def _prepare_console() -> None:
-    global _windowless
+    global _launched_without_terminal
     if sys.stdout is None:
-        # ターミナルのないアプリ（LanDrop.exe・LanDrop.app）として起動したときは、表示をファイルに残す
-        _windowless = True
-        LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
-        sys.stdout = sys.stderr = open(LOG_FILE, "w", encoding="utf-8", buffering=1)  # noqa: SIM115
-    # 表示できない文字（フォルダ名の絵文字など）があっても起動を止めない
+        _launched_without_terminal = True
+        _redirect_output_to_log_file()
+    _replace_unprintable_characters()
+
+
+def _redirect_output_to_log_file() -> None:
+    WINDOWLESS_APP_OUTPUT_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    sys.stdout = sys.stderr = open(WINDOWLESS_APP_OUTPUT_LOG_FILE, "w", encoding="utf-8", buffering=1)  # noqa: SIM115
+
+
+def _replace_unprintable_characters() -> None:
     for stream in (sys.stdout, sys.stderr):
         try:
             stream.reconfigure(errors="replace")  # type: ignore[union-attr]
@@ -541,8 +562,7 @@ def _can_print(text: str) -> bool:
     return True
 
 
-def _enable_ansi() -> bool:
-    """色指定のエスケープシーケンスを使えるか。Windowsでは仮想端末モードを有効にする。"""
+def _ansi_colors_available() -> bool:
     if not sys.stdout.isatty():
         return False
     if os.name != "nt":
@@ -551,11 +571,10 @@ def _enable_ansi() -> bool:
         import ctypes
 
         kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
-        handle = kernel32.GetStdHandle(-11)  # 標準出力
+        handle = kernel32.GetStdHandle(_STD_OUTPUT_HANDLE)
         mode = ctypes.c_uint32()
         if not kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
             return False
-        # ENABLE_VIRTUAL_TERMINAL_PROCESSING
-        return bool(kernel32.SetConsoleMode(handle, mode.value | 0x0004))
+        return bool(kernel32.SetConsoleMode(handle, mode.value | _ENABLE_VIRTUAL_TERMINAL_PROCESSING))
     except (AttributeError, OSError):
         return False

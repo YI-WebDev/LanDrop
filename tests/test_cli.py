@@ -1,18 +1,19 @@
-"""起動オプションとターミナル表示。"""
-
 from __future__ import annotations
 
 import argparse
+import contextlib
 import logging
 import re
 import socket
 import threading
 import time
 import types
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 import qrcode
+import uvicorn
 
 from landrop import cli
 from landrop.idle import IdleTracker, StopRequest
@@ -122,13 +123,44 @@ def test_ambiguous_ip_can_be_chosen_interactively(monkeypatch: pytest.MonkeyPatc
 
 def test_public_network_warning(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(cli.os, "name", "nt")
-    public = Interface("192.168.1.5", "Wi-Fi", category="Public")
-    private = Interface("192.168.1.6", "イーサネット", category="Private")
+    public = Interface("192.168.1.5", "Wi-Fi", windows_network_category="Public")
+    private = Interface("192.168.1.6", "イーサネット", windows_network_category="Private")
 
     assert "パブリック" in cli._profile_warnings("192.168.1.5", [public], detailed=True)[0]
     assert cli._profile_warnings("192.168.1.6", [private], detailed=True) == []
-    # 確認できなくても起動は続け、その旨だけを伝える
-    assert "確認できません" in cli._profile_warnings("192.168.1.7", [], detailed=False)[0]
+    unknown_profile_warning = cli._profile_warnings(
+        "192.168.1.7", [], detailed=False
+    )[0]
+    assert "確認できません" in unknown_profile_warning
+
+
+def test_invalid_request_notice_survives_uvicorn_logging_setup() -> None:
+    uvicorn_error_logger = logging.getLogger("uvicorn.error")
+    with _restored_uvicorn_loggers():
+        cli._install_invalid_request_notice()
+        installed = uvicorn_error_logger.filters[-1]
+        uvicorn.Config(_empty_asgi_app, log_level="warning")
+        assert installed in uvicorn_error_logger.filters
+        assert isinstance(installed, cli._InvalidRequestNotice)
+
+
+@contextlib.contextmanager
+def _restored_uvicorn_loggers() -> Iterator[None]:
+    loggers = [logging.getLogger(name) for name in ("uvicorn", "uvicorn.error", "uvicorn.access")]
+    saved = [(lg, lg.handlers[:], lg.filters[:], lg.level, lg.propagate, lg.disabled) for lg in loggers]
+    try:
+        yield
+    finally:
+        for lg, handlers, filters, level, propagate, disabled in saved:
+            lg.handlers[:] = handlers
+            lg.filters[:] = filters
+            lg.setLevel(level)
+            lg.propagate = propagate
+            lg.disabled = disabled
+
+
+async def _empty_asgi_app(scope: object, receive: object, send: object) -> None:
+    return None
 
 
 def test_invalid_http_request_warning_becomes_one_japanese_notice(
@@ -144,15 +176,14 @@ def test_invalid_http_request_warning_becomes_one_japanese_notice(
     finally:
         logger.removeFilter(notice)
 
-    # 英語の警告は出さず、ほかの警告はそのまま通す
-    assert [r.getMessage() for r in caplog.records] == ["ほかの警告"]
+    remaining_messages = [r.getMessage() for r in caplog.records]
+    assert remaining_messages == ["ほかの警告"]
     out = capsys.readouterr().out
     assert out.count("[お知らせ]") == 1
     assert "http://" in out
 
 
 def _decode(rendered: str) -> list[list[bool]]:
-    """描画したQRコードを、暗いマス = True の行列に戻す。"""
     halves = {"█": (False, False), "▀": (False, True), "▄": (True, False), " ": (True, True)}
     rows: list[list[bool]] = []
     for line in re.sub(r"\x1b\[[0-9;]*m", "", rendered).splitlines():
@@ -207,14 +238,14 @@ def test_watcher_stops_server_on_request(capsys: pytest.CaptureFixture[str]) -> 
     stop = StopRequest()
     stop.request("PCの画面から停止しました。")
 
-    cli._watch(server, IdleTracker(0), stop, threading.Event(), 30)  # type: ignore[arg-type]
+    cli._watch_for_stop(server, IdleTracker(0), stop, threading.Event(), 30)  # type: ignore[arg-type]
 
     assert server.should_exit is True
     assert "PCの画面から停止しました。" in capsys.readouterr().out
 
 
 def test_ambiguous_ip_uses_best_candidate_without_terminal(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(cli, "_windowless", True)
+    monkeypatch.setattr(cli, "_launched_without_terminal", True)
     monkeypatch.setattr(cli.network, "default_route_ip", lambda: None)
     interfaces = [
         Interface("192.168.1.5", "Wi-Fi", has_gateway=True),
@@ -222,9 +253,9 @@ def test_ambiguous_ip_uses_best_candidate_without_terminal(monkeypatch: pytest.M
     ]
     notices: list[str] = []
 
-    # 番号を入力できないので、いちばん有力な候補を使い、ほかの候補を注意として残す
     assert cli._select_ip(interfaces, detailed=True, notices=notices) == "192.168.1.5"
-    assert "--ip 192.168.2.5" in notices[0]
+    other_candidates_notice = notices[0]
+    assert "--ip 192.168.2.5" in other_candidates_notice
 
 
 def test_startup_error_is_shown_in_a_dialog_without_terminal(
@@ -232,8 +263,8 @@ def test_startup_error_is_shown_in_a_dialog_without_terminal(
 ) -> None:
     log = tmp_path / "LanDrop.log"
     log.write_text("ネットワークを確認しています...\nポート 8765 は使用中か、使用できません。\n", encoding="utf-8")
-    monkeypatch.setattr(cli, "LOG_FILE", log)
-    monkeypatch.setattr(cli, "_windowless", True)
+    monkeypatch.setattr(cli, "WINDOWLESS_APP_OUTPUT_LOG_FILE", log)
+    monkeypatch.setattr(cli, "_launched_without_terminal", True)
     shown: list[tuple[str, str]] = []
     monkeypatch.setattr(cli.desktop, "alert", lambda title, message: shown.append((title, message)))
 
@@ -245,15 +276,13 @@ def test_startup_error_is_shown_in_a_dialog_without_terminal(
 
 
 def test_startup_error_has_no_dialog_in_terminal(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(cli, "_windowless", False)
+    monkeypatch.setattr(cli, "_launched_without_terminal", False)
     monkeypatch.setattr(cli.desktop, "alert", lambda *_: pytest.fail("ターミナルで起動したのにダイアログを出した"))
 
     cli._keep_error_visible()
 
 
 class _FakeServer:
-    """`server.run` を呼ぶと、`should_exit` が立つまで動き続けるサーバーの代わり。"""
-
     def __init__(self) -> None:
         self.should_exit = False
         self.stopped = threading.Event()
@@ -267,13 +296,12 @@ class _FakeServer:
 def test_window_close_stops_the_server_and_waits_for_it(monkeypatch: pytest.MonkeyPatch) -> None:
     server = _FakeServer()
     closed: list[str] = []
-    monkeypatch.setattr(cli.desktop, "run_window", lambda url: True)
+    monkeypatch.setattr(cli.desktop, "show_window_until_closed", lambda url: True)
     monkeypatch.setattr(cli.desktop, "close_window", lambda: closed.append("close"))
     monkeypatch.setattr(cli.desktop, "open_app_window", lambda url: pytest.fail("ブラウザで開き直した"))
 
     cli._serve_with_window(server, [], "http://127.0.0.1:8765/pc", lambda: setattr(server, "should_exit", True))  # type: ignore[arg-type]
 
-    # ウィンドウが閉じられたら停止を頼み、サーバーが止まるまで待つ
     assert server.stopped.is_set()
     assert closed == ["close"]
 
@@ -281,12 +309,12 @@ def test_window_close_stops_the_server_and_waits_for_it(monkeypatch: pytest.Monk
 def test_falls_back_to_the_browser_when_the_window_cannot_open(monkeypatch: pytest.MonkeyPatch) -> None:
     server = _FakeServer()
     opened: list[str] = []
-    monkeypatch.setattr(cli.desktop, "run_window", lambda url: False)
+    monkeypatch.setattr(cli.desktop, "show_window_until_closed", lambda url: False)
     monkeypatch.setattr(cli.desktop, "close_window", lambda: None)
 
     def open_in_browser(url: str) -> None:
         opened.append(url)
-        server.should_exit = True  # ブラウザの画面から停止した
+        server.should_exit = True
 
     monkeypatch.setattr(cli.desktop, "open_app_window", open_in_browser)
 

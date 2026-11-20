@@ -1,5 +1,3 @@
-"""FastAPIアプリケーションの組み立て。"""
-
 from __future__ import annotations
 
 import asyncio
@@ -46,12 +44,12 @@ from landrop.security import (
 from landrop.storage import Receiver, UploadError, find_file, list_files
 
 STATIC_DIR = Path(__file__).parent / "static"
-_CONTENT_LENGTH = re.compile(r"[0-9]+")
-# PCの画面とのつなぎっぱなしの接続で、停止の依頼がないか確かめる間隔
-_EVENTS_CHECK_SECONDS = 0.5
+_VALID_CONTENT_LENGTH = re.compile(r"[0-9]+")
+_STOP_POLL_SECONDS = 0.5
+_STATUS_CLIENT_DISCONNECTED = 400
+_NO_SIZE_LIMIT = sys.maxsize
 
-# PCの画面で中身を表示してよい種類。HTMLやSVGのように、開くとスクリプトが動く形式は含めない
-PREVIEW_TYPES = {
+SCRIPTLESS_PREVIEW_TYPES = {
     ".jpg": "image/jpeg",
     ".jpeg": "image/jpeg",
     ".png": "image/png",
@@ -64,17 +62,23 @@ PREVIEW_TYPES = {
     ".mov": "video/quicktime",
     ".webm": "video/webm",
 }
-# 中身が別の形式だったとしても、直接開いたときにスクリプトを動かさない
-_PREVIEW_HEADERS = {
+_PREVIEW_SANDBOX_HEADERS = {
     "Content-Security-Policy": "sandbox; default-src 'none'; img-src 'self'; media-src 'self'",
     "Cache-Control": "private, max-age=300",
 }
 
-# Windowsではレジストリの設定で .js が text/plain になることがあり、nosniff と組み合わさると
-# スクリプトが読み込まれなくなるため明示しておく
-mimetypes.add_type("text/javascript", ".js")
-mimetypes.add_type("text/css", ".css")
-mimetypes.add_type("image/svg+xml", ".svg")
+
+def _override_windows_registry_mime_types() -> None:
+    mimetypes.add_type("text/javascript", ".js")
+    mimetypes.add_type("text/css", ".css")
+    mimetypes.add_type("image/svg+xml", ".svg")
+
+
+_override_windows_registry_mime_types()
+
+
+def _new_secret() -> str:
+    return secrets.token_urlsafe(32)
 
 
 @dataclass(frozen=True)
@@ -86,22 +90,19 @@ class AppConfig:
     max_size: int
     pc_name: str
     tracker: IdleTracker
-    # QRコードのURLに含めるトークン（起動ごとに生成）
-    token: str = field(default_factory=lambda: secrets.token_urlsafe(32))
-    # Cookieに保存する値。URLに載るトークンとは別の値にしておく
-    session_key: str = field(default_factory=lambda: secrets.token_urlsafe(32))
-    # PCの画面用のトークンとCookieの値（スマホ用とは別）
-    pc_token: str = field(default_factory=lambda: secrets.token_urlsafe(32))
-    pc_session_key: str = field(default_factory=lambda: secrets.token_urlsafe(32))
+    phone_url_token: str = field(default_factory=_new_secret)
+    phone_cookie_secret: str = field(default_factory=_new_secret)
+    pc_url_token: str = field(default_factory=_new_secret)
+    pc_cookie_secret: str = field(default_factory=_new_secret)
     stop: StopRequest = field(default_factory=StopRequest)
-    # 起動時の注意（パブリック ネットワークなど）。PCの画面に表示する
-    notices: tuple[str, ...] = ()
-    # PCの画面が閉じられてから停止するまでの猶予。再読み込みなら、この間に開き直される
-    close_grace_seconds: float = 4.0
-    # 一度接続したスマホを覚えておく場所。None なら覚えず、起動ごとにQRコードを読み取ってもらう
+    startup_notices: tuple[str, ...] = ()
+    pc_window_close_grace_seconds: float = 4.0
     devices: DeviceStore | None = None
-    # LAN内に告知する名前（例: landrop-my-pc.local）。None なら名前のアドレスを使わない
     local_name: str | None = None
+
+    @property
+    def remembers_devices(self) -> bool:
+        return self.devices is not None
 
     @property
     def base_url(self) -> str:
@@ -113,7 +114,7 @@ class AppConfig:
 
     @property
     def access_url(self) -> str:
-        return f"{self.base_url}{AUTH_PATH}?t={self.token}"
+        return f"{self.base_url}{AUTH_PATH}?t={self.phone_url_token}"
 
 
 def _error(status_code: int, message: str) -> JSONResponse:
@@ -121,35 +122,38 @@ def _error(status_code: int, message: str) -> JSONResponse:
 
 
 def _preview_type(name: str) -> str | None:
-    return PREVIEW_TYPES.get(Path(name).suffix.lower())
+    return SCRIPTLESS_PREVIEW_TYPES.get(Path(name).suffix.lower())
 
 
 async def _receive_upload(request: Request, receiver: Receiver, name: str) -> Response:
     if not is_same_origin(request):
         return _error(403, "このページ以外からの送信は受け付けません。")
     length = request.headers.get("content-length", "")
-    if not _CONTENT_LENGTH.fullmatch(length):
+    if not _VALID_CONTENT_LENGTH.fullmatch(length):
         return _error(411, "ファイルサイズ（Content-Length）が必要です。")
     try:
         saved = await receiver.receive(name, int(length), request.stream())
     except UploadError as e:
         return _error(e.status_code, e.message)
     except ClientDisconnect:
-        # 相手が切断しているため、このレスポンスは届かない
-        return Response(status_code=400)
+        return Response(status_code=_STATUS_CLIENT_DISCONNECTED)
     except OSError:
         return _error(500, "PCの保存先フォルダに書き込めませんでした。")
     return JSONResponse({"name": saved}, status_code=201)
 
 
+def _run_after_delay(seconds: float, callback: Callable[[], None]) -> None:
+    timer = threading.Timer(seconds, callback)
+    timer.daemon = True
+    timer.start()
+
+
 def create_app(config: AppConfig) -> FastAPI:
     app = FastAPI(title="LanDrop", docs_url=None, redoc_url=None, openapi_url=None)
     receiver = Receiver(config.received_dir, config.max_size)
-    # PCから共有フォルダへの追加。スマホからの受信と違い上限は設けない（空き容量は確認する）
-    sharer = Receiver(config.share_dir, sys.maxsize)
+    sharer = Receiver(config.share_dir, _NO_SIZE_LIMIT)
     folders = {"share": config.share_dir, "received": config.received_dir}
-    # 開いているPCの画面の数（つなぎっぱなしの接続の数）
-    open_windows = 0
+    open_pc_screen_connections = 0
 
     def find_in(folder: str, name: str) -> Path | None:
         path = folders.get(folder)
@@ -160,54 +164,56 @@ def create_app(config: AppConfig) -> FastAPI:
         except OSError:
             return None
 
-    def stop_after_close(still_closed: Callable[[], bool]) -> None:
-        """PCの画面が閉じられたら、転送が終わってから停止する。"""
-        if not still_closed():
-            # 再読み込みや、別のウィンドウで開き直された
+    def stop_after_transfers_if_still_closed(pc_screen_is_still_closed: Callable[[], bool]) -> None:
+        if not pc_screen_is_still_closed():
             return
-        if receiver.in_progress or config.tracker.active_requests:
-            # 転送中なら、終わるのを待ってから止める
-            _later(config.close_grace_seconds, lambda: stop_after_close(still_closed))
+        transfers_are_running = receiver.in_progress or config.tracker.active_requests
+        if transfers_are_running:
+            _run_after_delay(
+                config.pc_window_close_grace_seconds,
+                lambda: stop_after_transfers_if_still_closed(pc_screen_is_still_closed),
+            )
             return
         config.stop.request("PCの画面が閉じられたため、停止しました。")
 
-    # LanDrop自身のウィンドウ（WebView2）が閉じられたときに、起動した側から呼ぶ
-    app.state.pc_window_closed = lambda: stop_after_close(lambda: True)
+    app.state.pc_window_closed = lambda: stop_after_transfers_if_still_closed(lambda: True)
 
-    # ---------- スマホの画面 ----------
-
-    def remember(response: Response, secret: str) -> Response:
+    def remember_device_with_cookie(response: Response, secret: str) -> Response:
         response.set_cookie(
-            DEVICE_COOKIE_NAME, secret, max_age=DEVICE_COOKIE_MAX_AGE, httponly=True, samesite="lax", path="/"
+            DEVICE_COOKIE_NAME,
+            secret,
+            max_age=DEVICE_COOKIE_MAX_AGE,
+            httponly=True,
+            samesite="lax",
+            path="/",
         )
         return response
 
     @app.get(AUTH_PATH)
     def auth(request: Request, t: str = "", h: str = "") -> Response:
-        # トークンがアドレスバーや履歴に残らないよう、トークンなしのURLへ移動させる
         response = RedirectResponse("/", status_code=303)
         devices = config.devices
-        if h and devices is not None:
-            # 名前のアドレスへ移ってきた。同じ端末として、このアドレス用の鍵を渡す
+        arrived_at_local_name_from_handoff = bool(h) and devices is not None
+        if arrived_at_local_name_from_handoff:
             current = devices.authenticate(request.cookies.get(DEVICE_COOKIE_NAME, ""))
             secret = devices.redeem_handoff(h, current_device=current)
             if secret == ALREADY_REMEMBERED:
                 return response
             if secret is not None:
-                return remember(response, secret)
-        if not t or not token_matches(t, config.token):
+                return remember_device_with_cookie(response, secret)
+        if not t or not token_matches(t, config.phone_url_token):
             return message_page(
                 "このリンクは使えません",
                 "LanDropを起動し直した場合は、新しく表示されたQRコードを読み取ってください。",
                 403,
             )
         if devices is None:
-            response.set_cookie(COOKIE_NAME, config.session_key, httponly=True, samesite="lax", path="/")
+            response.set_cookie(COOKIE_NAME, config.phone_cookie_secret, httponly=True, samesite="lax", path="/")
             return response
-        if devices.authenticate(request.cookies.get(DEVICE_COOKIE_NAME, "")) is not None:
-            # すでに覚えている端末。QRコードを読み直しても、端末を増やさない
+        device_is_already_remembered = devices.authenticate(request.cookies.get(DEVICE_COOKIE_NAME, "")) is not None
+        if device_is_already_remembered:
             return response
-        return remember(response, devices.register(device_label(request.headers.get("user-agent", ""))))
+        return remember_device_with_cookie(response, devices.register(device_label(request.headers.get("user-agent", ""))))
 
     @app.get("/")
     def index() -> FileResponse:
@@ -215,18 +221,17 @@ def create_app(config: AppConfig) -> FastAPI:
 
     @app.get("/api/info")
     def info(request: Request) -> dict[str, object]:
+        phone_is_remembered = DEVICE_SCOPE_KEY in request.scope
         return {
             "pc_name": config.pc_name,
             "address": config.base_url,
             "max_size": config.max_size,
-            # 覚えている端末か（次からQRコードなしで開けるか）
-            "remembered": DEVICE_SCOPE_KEY in request.scope,
+            "remembered": phone_is_remembered,
             "local_url": config.local_url,
         }
 
     @app.post("/api/handoff")
     def handoff(request: Request) -> Response:
-        """名前のアドレス（landrop-xxx.local）で開き直すためのURLを返す。Cookieはアドレスごとに別なので、鍵を渡し直す。"""
         if not is_same_origin(request):
             return _error(403, "このページ以外からの操作は受け付けません。")
         device_id = request.scope.get(DEVICE_SCOPE_KEY)
@@ -260,14 +265,12 @@ def create_app(config: AppConfig) -> FastAPI:
     async def upload(request: Request, name: str = "") -> Response:
         return await _receive_upload(request, receiver, name)
 
-    # ---------- PCの画面（127.0.0.1 からだけ使える） ----------
-
     @app.get(PC_AUTH_PATH)
     def pc_auth(t: str = "") -> Response:
-        if not token_matches(t, config.pc_token):
+        if not token_matches(t, config.pc_url_token):
             return message_page("このリンクは使えません", "LanDropを起動し直すと、新しいPCの画面が開きます。", 403)
         response = RedirectResponse(PC_PREFIX, status_code=303)
-        response.set_cookie(PC_COOKIE_NAME, config.pc_session_key, httponly=True, samesite="strict", path=PC_PREFIX)
+        response.set_cookie(PC_COOKIE_NAME, config.pc_cookie_secret, httponly=True, samesite="strict", path=PC_PREFIX)
         return response
 
     @app.get(PC_PREFIX)
@@ -281,12 +284,12 @@ def create_app(config: AppConfig) -> FastAPI:
             "address": config.base_url,
             "phone_url": config.access_url,
             "local_url": config.local_url,
-            "remembers_devices": config.devices is not None,
+            "remembers_devices": config.remembers_devices,
             "share_dir": str(config.share_dir),
             "received_dir": str(config.received_dir),
             "max_size": config.max_size,
             "remaining_seconds": config.tracker.remaining_seconds(),
-            "notices": list(config.notices),
+            "notices": list(config.startup_notices),
         }
 
     @app.get(PC_PREFIX + "/qr.svg")
@@ -295,22 +298,21 @@ def create_app(config: AppConfig) -> FastAPI:
 
     @app.get(PC_PREFIX + "/api/events")
     def pc_events() -> StreamingResponse:
-        """PCの画面が開いている間つないでおく接続。切れたら、画面が閉じられたとみなす。
-
-        ウィンドウを閉じるとブラウザごと終了することもあるため、閉じるときの連絡には頼らない。
-        """
-
         async def stream() -> AsyncIterator[bytes]:
-            nonlocal open_windows
-            open_windows += 1
+            nonlocal open_pc_screen_connections
+            open_pc_screen_connections += 1
             try:
                 yield b"open\n"
-                # 停止するときは、こちらから接続を終えてサーバーの終了を待たせない
                 while config.stop.reason is None:
-                    await asyncio.sleep(_EVENTS_CHECK_SECONDS)
+                    await asyncio.sleep(_STOP_POLL_SECONDS)
             finally:
-                open_windows -= 1
-                _later(config.close_grace_seconds, lambda: stop_after_close(lambda: open_windows == 0))
+                open_pc_screen_connections -= 1
+                _run_after_delay(
+                    config.pc_window_close_grace_seconds,
+                    lambda: stop_after_transfers_if_still_closed(
+                        lambda: open_pc_screen_connections == 0
+                    ),
+                )
 
         return StreamingResponse(stream(), media_type="text/plain")
 
@@ -336,7 +338,7 @@ def create_app(config: AppConfig) -> FastAPI:
         path = find_in(folder, name) if media_type else None
         if path is None:
             return _error(404, "表示できるファイルが見つかりません。")
-        return FileResponse(path, media_type=media_type, headers=_PREVIEW_HEADERS)
+        return FileResponse(path, media_type=media_type, headers=_PREVIEW_SANDBOX_HEADERS)
 
     @app.post(PC_PREFIX + "/api/share")
     async def pc_share(request: Request, name: str = "") -> Response:
@@ -389,24 +391,23 @@ def create_app(config: AppConfig) -> FastAPI:
 
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
-    # 後から追加したものほど外側で動く
-    app.add_middleware(ActivityMiddleware, tracker=config.tracker)
-    app.add_middleware(
-        AuthMiddleware,
-        session_key=config.session_key,
-        pc_session_key=config.pc_session_key,
-        devices=config.devices,
-    )
-    hosts = [config.host_ip, "localhost", "127.0.0.1"]
+    allowed_hosts = [config.host_ip, "localhost", "127.0.0.1"]
     if config.local_name:
-        hosts.append(config.local_name)
-    app.add_middleware(TrustedHostMiddleware, allowed_hosts=hosts, www_redirect=False)
-    # スマホの画面から、名前のアドレスで開けるかを画像の読み込みで確かめるため、そのオリジンだけ許す
-    app.add_middleware(SecurityHeadersMiddleware, headers=security_headers(config.local_url))
+        allowed_hosts.append(config.local_name)
+    headers_with_local_name_image = security_headers(config.local_url)
+    middlewares_innermost_first = [
+        (ActivityMiddleware, {"tracker": config.tracker}),
+        (
+            AuthMiddleware,
+            {
+                "phone_cookie_secret": config.phone_cookie_secret,
+                "pc_cookie_secret": config.pc_cookie_secret,
+                "devices": config.devices,
+            },
+        ),
+        (TrustedHostMiddleware, {"allowed_hosts": allowed_hosts, "www_redirect": False}),
+        (SecurityHeadersMiddleware, {"headers": headers_with_local_name_image}),
+    ]
+    for middleware, options in middlewares_innermost_first:
+        app.add_middleware(middleware, **options)
     return app
-
-
-def _later(seconds: float, callback: Callable[[], None]) -> None:
-    timer = threading.Timer(seconds, callback)
-    timer.daemon = True
-    timer.start()

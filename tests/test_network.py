@@ -1,5 +1,3 @@
-"""LANのIPアドレスの選び方と、ポートの確保。"""
-
 from __future__ import annotations
 
 import socket
@@ -10,7 +8,7 @@ import pytest
 from landrop import network
 from landrop.network import Interface, choose_interface, exclusion_reason
 
-WIFI = Interface("192.168.10.20", "Wi-Fi", "Intel(R) Wi-Fi 6E AX211 160MHz", has_gateway=True, category="Private")
+WIFI = Interface("192.168.10.20", "Wi-Fi", "Intel(R) Wi-Fi 6E AX211 160MHz", has_gateway=True, windows_network_category="Private")
 ETHERNET = Interface("192.168.10.21", "イーサネット", "Realtek PCIe GbE Family Controller", has_gateway=True)
 WSL = Interface("172.27.112.1", "vEthernet (WSL (Hyper-V firewall))", "Hyper-V Virtual Ethernet Adapter")
 HYPERV = Interface("172.20.48.1", "vEthernet (Default Switch)", "Hyper-V Virtual Ethernet Adapter #2")
@@ -84,9 +82,8 @@ def test_parse_windows_json() -> None:
 
     assert interfaces[0] == Interface("192.168.10.108", "イーサネット", "Realtek PCIe GbE", True, "Public")
     assert interfaces[1].ip == "127.0.0.1"
-    # アドレスが1つだけのときは配列ではなくオブジェクトで返ってくる
-    single = network.parse_windows_json('{"ip":"10.0.0.2","name":"Wi-Fi","gateway":true}')
-    assert single == [Interface("10.0.0.2", "Wi-Fi", "", True, "")]
+    single_object_result = network.parse_windows_json('{"ip":"10.0.0.2","name":"Wi-Fi","gateway":true}')
+    assert single_object_result == [Interface("10.0.0.2", "Wi-Fi", "", True, "")]
 
 
 def test_parse_ifconfig() -> None:
@@ -135,6 +132,5 @@ def test_powershell_runs_without_a_console_window(monkeypatch: pytest.MonkeyPatc
 
     monkeypatch.setattr(network.subprocess, "run", fake_run)
 
-    # ターミナルのないアプリから呼んでも、PowerShellの黒いウィンドウが出ないようにする
     assert network._windows_interfaces() is None
-    assert seen["creationflags"] == getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    assert seen["creationflags"] == getattr(subprocess, "CREATE_NO_WINDOW", 0), "console window suppressed"

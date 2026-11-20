@@ -1,5 +1,3 @@
-"""トークン認証とセキュリティ関連のHTTPヘッダー。"""
-
 from __future__ import annotations
 
 import ipaddress
@@ -14,15 +12,11 @@ from landrop.devices import DEVICE_COOKIE_NAME, DeviceStore
 
 COOKIE_NAME = "landrop_session"
 AUTH_PATH = "/auth"
-# PCの画面。127.0.0.1 で待ち受けるソケットからだけ使え、スマホ用とは別のトークンとCookieで認証する
 PC_PREFIX = "/pc"
 PC_AUTH_PATH = "/pc/auth"
 PC_COOKIE_NAME = "landrop_pc"
-# 認証済みのリクエストであることを後段のミドルウェアへ伝えるためのキー
 AUTHENTICATED_SCOPE_KEY = "landrop.authenticated"
-# 覚えている端末のCookieで通したときの、その端末のid
 DEVICE_SCOPE_KEY = "landrop.device"
-# 未認証でも返してよいもの（ファイル名やフォルダ構成を含まない画面部品のみ）
 _PUBLIC_PREFIXES = ("/static/",)
 
 SECURITY_HEADERS = {
@@ -38,13 +32,13 @@ SECURITY_HEADERS = {
 
 
 def security_headers(extra_img_src: str | None = None) -> dict[str, str]:
-    """extra_img_src: 画像の読み込みを許す別のオリジン（名前のアドレスで開けるかの確認に使う）。"""
     headers = dict(SECURITY_HEADERS)
     if extra_img_src:
         headers["Content-Security-Policy"] = headers["Content-Security-Policy"].replace(
             "img-src 'self' data:", f"img-src 'self' data: {extra_img_src}"
         )
     return headers
+
 
 _MESSAGE_PAGE = """<!doctype html>
 <html lang="ja">
@@ -75,16 +69,14 @@ def message_page(title: str, body: str, status_code: int) -> HTMLResponse:
 
 
 def is_same_origin(request: Request) -> bool:
-    """ブラウザからの送信が、このサーバー自身の画面から行われたものか確認する。"""
     origin = request.headers.get("origin")
-    if origin is None:
-        # curl など Origin を付けないクライアント
+    sent_by_non_browser_client = origin is None
+    if sent_by_non_browser_client:
         return True
     return origin == f"http://{request.headers.get('host', '')}"
 
 
 def is_local_connection(scope: Scope) -> bool:
-    """127.0.0.1 で待ち受けているソケットへの、このPC自身からの接続かどうか。"""
     server, client = scope.get("server"), scope.get("client")
     if not server or not client:
         return False
@@ -99,14 +91,12 @@ def _is_pc_path(path: str) -> bool:
 
 
 class AuthMiddleware:
-    """セッションCookieのないリクエストを、内容を一切返さずに拒否する。"""
-
     def __init__(
-        self, app: ASGIApp, session_key: str, pc_session_key: str, devices: DeviceStore | None = None
+        self, app: ASGIApp, phone_cookie_secret: str, pc_cookie_secret: str, devices: DeviceStore | None = None
     ) -> None:
         self.app = app
-        self.session_key = session_key
-        self.pc_session_key = pc_session_key
+        self.phone_cookie_secret = phone_cookie_secret
+        self.pc_cookie_secret = pc_cookie_secret
         self.devices = devices
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
@@ -116,7 +106,7 @@ class AuthMiddleware:
 
         path: str = scope["path"]
         if _is_pc_path(path):
-            await self._pc(scope, receive, send)
+            await self._authenticate_pc_request(scope, receive, send)
             return
         if path == AUTH_PATH or path.startswith(_PUBLIC_PREFIXES):
             await self.app(scope, receive, send)
@@ -124,7 +114,7 @@ class AuthMiddleware:
 
         cookies = Request(scope).cookies
         cookie = cookies.get(COOKIE_NAME, "")
-        if cookie and token_matches(cookie, self.session_key):
+        if cookie and token_matches(cookie, self.phone_cookie_secret):
             scope[AUTHENTICATED_SCOPE_KEY] = True
             await self.app(scope, receive, send)
             return
@@ -149,15 +139,14 @@ class AuthMiddleware:
             )
         await response(scope, receive, send)
 
-    async def _pc(self, scope: Scope, receive: Receive, send: Send) -> None:
+    async def _authenticate_pc_request(self, scope: Scope, receive: Receive, send: Send) -> None:
         response: Response
         if not is_local_connection(scope):
-            # スマホなど他の機器からは、PCの画面があること自体を分からないようにする
             response = JSONResponse({"detail": "Not Found"}, status_code=404)
         elif scope["path"] == PC_AUTH_PATH:
             await self.app(scope, receive, send)
             return
-        elif token_matches(Request(scope).cookies.get(PC_COOKIE_NAME, ""), self.pc_session_key):
+        elif token_matches(Request(scope).cookies.get(PC_COOKIE_NAME, ""), self.pc_cookie_secret):
             scope[AUTHENTICATED_SCOPE_KEY] = True
             await self.app(scope, receive, send)
             return
@@ -175,8 +164,6 @@ class AuthMiddleware:
 
 
 class SecurityHeadersMiddleware:
-    """すべてのレスポンスにセキュリティ関連のヘッダーを付ける。"""
-
     def __init__(self, app: ASGIApp, headers: dict[str, str] | None = None) -> None:
         self.app = app
         self.headers = headers or SECURITY_HEADERS
