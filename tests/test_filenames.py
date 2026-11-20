@@ -1,5 +1,3 @@
-"""ファイル名の安全化（Windows予約名・使用できない文字・NFC正規化）。"""
-
 from __future__ import annotations
 
 import unicodedata

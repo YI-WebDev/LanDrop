@@ -1,4 +1,3 @@
-// LanDrop PCの画面の動作（ビルド工程なしの素のJavaScript。先に common.js を読み込む）
 "use strict";
 
 const ICONS = {
@@ -7,12 +6,14 @@ const ICONS = {
   play: "M8.5 5.5v13l10-6.5Z",
 };
 const STATUS_LABELS = { waiting: "待機中", uploading: "追加中", done: "追加済み", failed: "失敗" };
-const STATUS_TONES = { uploading: "primary", done: "success", failed: "danger" };
+const BADGE_TONE_BY_STATUS = { uploading: "primary", done: "success", failed: "danger" };
 const IMAGE_EXT = /\.(jpe?g|png|gif|webp|bmp|avif)$/i;
-// 一覧の自動更新の間隔。自動更新は「操作」に数えないので、開いたままでも自動停止は効く
 const POLL_MS = 2000;
 const STATUS_POLL_MS = 5000;
-const AUTO_HEADERS = { "X-LanDrop-Auto": "1" };
+const CONSECUTIVE_FAILURES_BEFORE_STOPPED = 2;
+const CLOSE_WINDOW_DELAY_MS = 600;
+const RECONNECT_DELAY_MS = 500;
+const PROGRESS_ROW_LINGER_MS = 2500;
 
 const state = {
   tab: "share",
@@ -20,14 +21,13 @@ const state = {
   status: null,
   files: { share: [], received: [] },
   signatures: { share: "", received: "" },
-  // 画面を開いたときにあったファイル。これ以外は「新着」として目立たせる
-  knownReceived: null,
+  receivedNamesAtPageOpen: null,
   newNames: new Set(),
   incoming: [],
   queue: [],
   running: false,
   nextId: 1,
-  failures: 0,
+  consecutiveFailures: 0,
   stopped: false,
   viewerFiles: [],
   viewerIndex: -1,
@@ -36,20 +36,17 @@ const state = {
 
 class Stopped extends Error {}
 
-// ---------- サーバーとの通信 ----------
-
 async function api(path, { method = "GET", auto = false } = {}) {
-  const headers = auto ? AUTO_HEADERS : {};
+  const headers = auto ? NOT_USER_ACTIVITY_HEADERS : {};
   let response;
   try {
     response = await fetch(path, { method, headers, cache: "no-store", credentials: "same-origin" });
   } catch {
-    state.failures += 1;
-    // 一時的な失敗で「停止」と出さないよう、続けて失敗したときだけ停止とみなす
-    if (state.failures >= 2) showStopped("LanDrop が停止しています", "ターミナルを閉じたか、自動停止しました。この画面は閉じてかまいません。");
+    state.consecutiveFailures += 1;
+    if (state.consecutiveFailures >= CONSECUTIVE_FAILURES_BEFORE_STOPPED) showStopped("LanDrop が停止しています", "ターミナルを閉じたか、自動停止しました。この画面は閉じてかまいません。");
     throw new Stopped();
   }
-  state.failures = 0;
+  state.consecutiveFailures = 0;
   if (response.status === 401) {
     showStopped("接続が切れました", "LanDropを起動し直してください。");
     throw new Stopped();
@@ -64,34 +61,37 @@ function query(params) {
   return new URLSearchParams(params).toString();
 }
 
-// 画面が開いている間、サーバーとの接続をつないでおく。サーバーはこれが切れたら、画面が閉じられたとみなす
-async function holdConnection() {
+async function waitUntilEventStreamEnds() {
   try {
-    const response = await fetch("/pc/api/events", { headers: AUTO_HEADERS, cache: "no-store", credentials: "same-origin" });
-    if (response.ok) {
-      const reader = response.body.getReader();
-      while (!(await reader.read()).done) {
-        // 中身は使わない。つながっていることだけが大事
-      }
-    }
+    const response = await fetch("/pc/api/events", { headers: NOT_USER_ACTIVITY_HEADERS, cache: "no-store", credentials: "same-origin" });
+    if (!response.ok) return;
+    const reader = response.body.getReader();
+    let chunk;
+    do {
+      chunk = await reader.read();
+    } while (!chunk.done);
   } catch {
-    // 下で状態を確かめる
+    return;
   }
-  // 切れたのは、サーバーが止まったか一時的な失敗。動いていれば、つなぎ直す
-  for (let attempt = 0; attempt < 2 && !state.stopped; attempt += 1) {
+}
+
+async function holdConnectionWhilePageIsOpen() {
+  await waitUntilEventStreamEnds();
+  const attemptsToConfirmServerIsStillRunning = 2;
+  for (let attempt = 0; attempt < attemptsToConfirmServerIsStillRunning && !state.stopped; attempt += 1) {
     try {
       await api("/pc/api/status", { auto: true });
-      setTimeout(holdConnection, 500);
+      setTimeout(holdConnectionWhilePageIsOpen, RECONNECT_DELAY_MS);
       return;
     } catch {
-      await new Promise((resolve) => setTimeout(resolve, 500));
+      await new Promise((resolve) => setTimeout(resolve, RECONNECT_DELAY_MS));
     }
   }
 }
 
 function previewUrl(folder, file) {
-  // 同じ名前で中身が変わったときに古い画像を出さないよう、更新日時を付ける
-  return `/pc/preview/${folder}/${encodeURIComponent(file.name)}?v=${file.modified}`;
+  const cacheBustingVersion = file.modified;
+  return `/pc/preview/${folder}/${encodeURIComponent(file.name)}?v=${cacheBustingVersion}`;
 }
 
 async function reveal(folder, name) {
@@ -110,8 +110,6 @@ async function openFolder(folder) {
   }
 }
 
-// ---------- 状態の表示 ----------
-
 async function loadStatus(auto = false) {
   try {
     const status = await api("/pc/api/status", { auto });
@@ -121,18 +119,20 @@ async function loadStatus(auto = false) {
     $("share-dir").textContent = status.share_dir;
     $("received-dir").textContent = status.received_dir;
     renderTimer(status.remaining_seconds);
-    renderNotices(status.notices || []);
+    renderStartupNoticesOnce(status.notices || []);
     $("devices-card").hidden = !status.remembers_devices;
     const localUrl = $("local-url");
     localUrl.hidden = !status.local_url;
     localUrl.textContent = status.local_url ? `スマホでの名前のアドレス: ${status.local_url}` : "";
     if (status.remembers_devices) await loadDevices(auto);
-  } catch {
-    // 停止の表示は api() が行う
+  } catch (error) {
+    if (!(error instanceof Stopped)) leaveToNextStatusPoll();
   }
 }
 
-// ---------- 覚えているスマホ ----------
+function leaveToNextStatusPoll() {}
+
+function serverMayAlreadyBeStopped() {}
 
 async function loadDevices(auto = false) {
   const { devices } = await api("/pc/api/devices", { auto });
@@ -171,8 +171,8 @@ async function forgetDevice(device, button) {
   button.disabled = false;
   try {
     await loadDevices();
-  } catch {
-    // 停止の表示は api() が行う
+  } catch (error) {
+    if (!(error instanceof Stopped)) leaveToNextStatusPoll();
   }
 }
 
@@ -187,10 +187,10 @@ function renderTimer(remaining) {
   }
 }
 
-// 起動時の注意（パブリック ネットワーク、ポートの変更など）。起動中は変わらないので一度だけ描く
-function renderNotices(notices) {
+function renderStartupNoticesOnce(notices) {
   const box = $("notices");
-  if (box.childElementCount === notices.length) return;
+  const alreadyRendered = box.childElementCount === notices.length;
+  if (alreadyRendered) return;
   box.replaceChildren(
     ...notices.map((text) => {
       const notice = el("p", "notice", text);
@@ -223,8 +223,6 @@ function showStopped(title, text) {
   $("connection").classList.add("is-offline");
   for (const dialog of document.querySelectorAll("dialog[open]")) dialog.close();
 }
-
-// ---------- 一覧 ----------
 
 async function loadFolder(folder, auto = false) {
   try {
@@ -308,10 +306,10 @@ function thumbImage(folder, file) {
 
 function updateReceived() {
   const files = state.files.received;
-  if (state.knownReceived === null) {
-    state.knownReceived = new Set(files.map((f) => f.name));
+  if (state.receivedNamesAtPageOpen === null) {
+    state.receivedNamesAtPageOpen = new Set(files.map((f) => f.name));
   } else {
-    const arrived = files.filter((f) => !state.knownReceived.has(f.name) && !state.newNames.has(f.name));
+    const arrived = files.filter((f) => !state.receivedNamesAtPageOpen.has(f.name) && !state.newNames.has(f.name));
     for (const file of arrived) state.newNames.add(file.name);
     if (arrived.length > 0) {
       const first = arrived[0].name;
@@ -404,15 +402,12 @@ function renderIncoming(incoming) {
     );
     const progress = el("div", "progress");
     const bar = el("div", "progress-bar");
-    // CSPで style 属性を禁止しているため、CSSOM で幅を変える
-    bar.style.transform = `scaleX(${Math.min(ratio, 1)})`;
+    setProgressBarRatio(bar, ratio);
     progress.append(bar);
     row.append(main, progress);
     list.append(row);
   }
 }
-
-// ---------- 共有フォルダへの追加 ----------
 
 function addToShare(files) {
   for (const file of files) {
@@ -422,7 +417,7 @@ function addToShare(files) {
     $("share-queue").append(item.node.root);
     renderQueueItem(item);
   }
-  pump();
+  uploadWaitingItemsOneAtATime();
 }
 
 function createQueueNode(item) {
@@ -438,7 +433,7 @@ function createQueueNode(item) {
   retry.addEventListener("click", () => {
     item.status = "waiting";
     renderQueueItem(item);
-    pump();
+    uploadWaitingItemsOneAtATime();
   });
   const progress = el("div", "progress");
   const bar = el("div", "progress-bar");
@@ -452,7 +447,7 @@ function renderQueueItem(item) {
   const size = item.file.size;
   root.dataset.status = item.status;
   status.textContent = STATUS_LABELS[item.status];
-  if (STATUS_TONES[item.status]) status.dataset.tone = STATUS_TONES[item.status];
+  if (BADGE_TONE_BY_STATUS[item.status]) status.dataset.tone = BADGE_TONE_BY_STATUS[item.status];
   else delete status.dataset.tone;
   retry.hidden = item.status !== "failed";
   let ratio = 0;
@@ -467,10 +462,10 @@ function renderQueueItem(item) {
   } else {
     meta.textContent = formatSize(size);
   }
-  bar.style.transform = `scaleX(${Math.min(ratio, 1)})`;
+  setProgressBarRatio(bar, ratio);
 }
 
-async function pump() {
+async function uploadWaitingItemsOneAtATime() {
   if (state.running) return;
   state.running = true;
   try {
@@ -496,11 +491,10 @@ function upload(item) {
       renderQueueItem(item);
       if (status === "done") {
         loadFolder("share");
-        // 一覧に加わったので、しばらくしたら進み具合の表示は消す
         setTimeout(() => {
           item.node.root.remove();
           state.queue = state.queue.filter((other) => other !== item);
-        }, 2500);
+        }, PROGRESS_ROW_LINGER_MS);
       }
       resolve();
     };
@@ -512,12 +506,7 @@ function upload(item) {
       renderQueueItem(item);
     });
     xhr.addEventListener("load", () => {
-      let body = {};
-      try {
-        body = JSON.parse(xhr.responseText);
-      } catch {
-        // 応答が JSON でなければ、ステータスコードだけで判断する
-      }
+      const body = parseJsonOrEmpty(xhr.responseText);
       if (xhr.status === 201) {
         const renamed = body.name && body.name !== item.file.name ? `「${body.name}」として` : "";
         finish("done", `${renamed}共有しました`);
@@ -530,8 +519,7 @@ function upload(item) {
   });
 }
 
-// ドロップされたもののうち、フォルダは送れないので除く
-function filesFromDrop(dataTransfer) {
+function filesWithoutFolders(dataTransfer) {
   const files = [];
   let folders = 0;
   for (const item of dataTransfer.items) {
@@ -563,26 +551,24 @@ function setupDragAndDrop() {
     event.preventDefault();
     event.dataTransfer.dropEffect = state.stopped ? "none" : "copy";
   });
-  window.addEventListener("dragleave", () => {
-    // ウィンドウの外へ出たときやドラッグをやめたときは、種類を問わず数え直す
+  const handleDragLeave = () => {
     if (overlay.hidden) return;
     depth = Math.max(0, depth - 1);
     if (depth === 0) overlay.hidden = true;
-  });
+  };
+  window.addEventListener("dragleave", handleDragLeave);
   window.addEventListener("drop", (event) => {
     if (!hasFiles(event)) return;
     event.preventDefault();
     depth = 0;
     overlay.hidden = true;
     if (state.stopped) return;
-    const files = filesFromDrop(event.dataTransfer);
+    const files = filesWithoutFolders(event.dataTransfer);
     if (files.length === 0) return;
     selectTab("share");
     addToShare(files);
   });
 }
-
-// ---------- 画像と動画の表示 ----------
 
 function openViewer(file) {
   const index = state.viewerFiles.findIndex((f) => f.name === file.name);
@@ -633,15 +619,17 @@ function setupViewer() {
     if (event.key === "ArrowLeft") moveViewer(-1);
     if (event.key === "ArrowRight") moveViewer(1);
   });
-  // 背景のクリックで閉じる
-  viewer.addEventListener("click", (event) => {
+  const closeOnBackdropClick = (event) => {
     if (event.target === viewer) viewer.close();
-  });
-  // 閉じたら動画の再生を止める
-  viewer.addEventListener("close", () => $("viewer-media").replaceChildren());
+  };
+  const stopVideoPlaybackByRemovingMedia = () => $("viewer-media").replaceChildren();
+  viewer.addEventListener("click", closeOnBackdropClick);
+  viewer.addEventListener("close", stopVideoPlaybackByRemovingMedia);
 }
 
-// ---------- 停止 ----------
+function closeWindow() {
+  window.close();
+}
 
 function setupStop() {
   const dialog = $("confirm-stop");
@@ -655,18 +643,11 @@ function setupStop() {
   $("confirm-cancel").addEventListener("click", () => dialog.close());
   $("confirm-stop-button").addEventListener("click", async () => {
     dialog.close();
-    try {
-      await api("/pc/api/stop", { method: "POST" });
-    } catch {
-      // すでに止まっている
-    }
+    await api("/pc/api/stop", { method: "POST" }).catch(serverMayAlreadyBeStopped);
     showStopped("停止しました", "この画面は閉じてかまいません。");
-    // 起動時に開いたウィンドウなら、そのまま閉じる（閉じられないブラウザでは表示だけ残る）
-    setTimeout(() => window.close(), 600);
+    setTimeout(closeWindow, CLOSE_WINDOW_DELAY_MS);
   });
 }
-
-// ---------- 切り替え ----------
 
 function selectTab(name) {
   state.tab = name;
@@ -683,15 +664,17 @@ function selectView(view) {
   for (const button of document.querySelectorAll(".view-toggle button")) {
     button.setAttribute("aria-pressed", String(button.dataset.view === view));
   }
-  try {
-    localStorage.setItem("landrop.view", view);
-  } catch {
-    // 保存できなくても表示は切り替える
-  }
+  saveViewPreference(view);
   renderReceived();
 }
 
-// ---------- 初期化 ----------
+function saveViewPreference(view) {
+  try {
+    localStorage.setItem("landrop.view", view);
+  } catch {
+    return;
+  }
+}
 
 document.addEventListener("DOMContentLoaded", () => {
   try {
@@ -707,8 +690,7 @@ document.addEventListener("DOMContentLoaded", () => {
   $("tab-received").addEventListener("click", () => selectTab("received"));
   $("share-input").addEventListener("change", (event) => {
     addToShare(Array.from(event.target.files));
-    // 同じファイルをもう一度選べるようにする
-    event.target.value = "";
+    clearFileInput(event.target);
   });
   for (const button of document.querySelectorAll("[data-open-folder]")) {
     button.addEventListener("click", () => openFolder(button.dataset.openFolder));
@@ -736,7 +718,7 @@ document.addEventListener("DOMContentLoaded", () => {
   loadStatus();
   loadFolder("share");
   loadFolder("received");
-  holdConnection();
+  holdConnectionWhilePageIsOpen();
   setInterval(() => {
     if (state.stopped) return;
     loadFolder("share", true);

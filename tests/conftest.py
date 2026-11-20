@@ -1,5 +1,3 @@
-"""テスト共通の準備。"""
-
 from __future__ import annotations
 
 import asyncio
@@ -31,12 +29,13 @@ class FakeClock:
 
 
 @pytest.fixture(autouse=True)
-def _isolated_state_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """起動の処理を通すテストが、ホームフォルダの devices.json・state.json を書き換えないようにする。"""
+def _isolated_state_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     from landrop import cli
 
-    monkeypatch.setattr(cli, "DEVICES_FILE", tmp_path / "state" / "devices.json")
-    monkeypatch.setattr(cli, "STATE_FILE", tmp_path / "state" / "state.json")
+    monkeypatch.setattr(cli, "REMEMBERED_DEVICES_FILE", tmp_path / "state" / "devices.json")
+    monkeypatch.setattr(cli, "LAST_PORT_STATE_FILE", tmp_path / "state" / "state.json")
 
 
 @pytest.fixture
@@ -64,8 +63,8 @@ def make_config(share_dir: Path, received_dir: Path) -> Callable[..., AppConfig]
             "max_size": 10 * 1024 * 1024,
             "pc_name": "TEST-PC",
             "tracker": IdleTracker(0),
-            "token": TOKEN,
-            "session_key": SESSION_KEY,
+            "phone_url_token": TOKEN,
+            "phone_cookie_secret": SESSION_KEY,
         }
         values.update(overrides)
         return AppConfig(**values)  # type: ignore[arg-type]
@@ -110,7 +109,6 @@ def asgi_request(
     messages: list[dict] | None = None,
     on_receive: Callable[[int], None] | None = None,
 ) -> list[dict]:
-    """ASGIアプリを直接呼び出す（途中切断など、HTTPクライアントでは再現しにくい状況用）。"""
     all_headers = {"host": f"{HOST_IP}:{PORT}", "cookie": f"landrop_session={SESSION_KEY}"}
     all_headers.update(headers or {})
     scope = {

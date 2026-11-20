@@ -1,5 +1,3 @@
-"""スマホからPCへの送信（自動改名・サイズ上限・空き容量・切断時の .part 削除）。"""
-
 from __future__ import annotations
 
 import asyncio
@@ -18,6 +16,8 @@ from landrop import storage
 from landrop.app import create_app
 from landrop.storage import Receiver, UploadError
 from tests.conftest import asgi_request
+
+YIELD_SECONDS = 0
 
 
 def _upload(client: TestClient, name: str, data: bytes) -> tuple[int, dict]:
@@ -75,7 +75,7 @@ def test_concurrent_uploads_get_unique_names(received_dir: Path) -> None:
 
     async def chunks(index: int) -> AsyncIterator[bytes]:
         for part in (f"{index}-a".encode(), f"{index}-b".encode()):
-            await asyncio.sleep(0)  # 他のアップロードと処理を入れ替える
+            await asyncio.sleep(YIELD_SECONDS)
             yield part
 
     async def run() -> list[str]:
@@ -186,10 +186,9 @@ def test_concurrent_reservations_count_against_free_space(
     async def run() -> None:
         first = asyncio.create_task(receiver.receive("a.bin", 100, slow()))
         await started.wait()
-        # 1つ目が100バイトを予約中のため、残り50バイトでは2つ目の100バイトは入らない
-        with pytest.raises(UploadError) as error:
+        with pytest.raises(UploadError) as insufficient_space:
             receiver.check_capacity(100)
-        assert error.value.status_code == 507
+        assert insufficient_space.value.status_code == 507
         await first
 
     asyncio.run(run())
@@ -206,8 +205,8 @@ def test_disconnect_removes_part_file(make_config: Callable, received_dir: Path)
 
     def on_receive(call: int) -> None:
         if call == 3:
-            # 切断を伝える直前には .part が書き込み途中で存在している
-            seen_part.append(bool(_part_files(received_dir)))
+            part_exists_mid_write = bool(_part_files(received_dir))
+            seen_part.append(part_exists_mid_write)
 
     asgi_request(
         app,
@@ -299,14 +298,13 @@ def test_progress_is_visible_while_receiving(received_dir: Path) -> None:
 
 def test_part_file_is_hidden_from_listings(received_dir: Path) -> None:
     receiver = Receiver(received_dir, max_size=1000)
-    listed: list[list[str]] = []
+    listed_while_part_file_exists: list[list[str]] = []
 
     async def chunks() -> AsyncIterator[bytes]:
-        listed.append([f.name for f in storage.list_files(received_dir)])
+        listed_while_part_file_exists.append([f.name for f in storage.list_files(received_dir)])
         yield b"x"
 
     asyncio.run(receiver.receive("a.txt", 1, chunks()))
 
-    # 受信中の .part は先頭が「.」なので、一覧に出ない
-    assert listed == [[]]
+    assert listed_while_part_file_exists == [[]]
     assert [f.name for f in storage.list_files(received_dir)] == ["a.txt"]

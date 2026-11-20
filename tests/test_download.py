@@ -1,5 +1,3 @@
-"""共有フォルダの一覧とダウンロード（パストラバーサル・シンボリックリンク・隠しファイル）。"""
-
 from __future__ import annotations
 
 import os
@@ -62,9 +60,9 @@ def test_content_disposition_has_ascii_fallback() -> None:
     header = content_disposition('写真 "1".jpg')
     assert header.startswith('attachment; filename="__ _1_.jpg"; ')
     assert header.endswith("filename*=UTF-8''%E5%86%99%E7%9C%9F%20%221%22.jpg")
-    # ヘッダーインジェクションにつながる改行は残さない
-    assert "\r" not in content_disposition("a\r\nSet-Cookie: x.txt")
-    assert "\n" not in content_disposition("a\r\nSet-Cookie: x.txt")
+    header_injection_attempt = content_disposition("a\r\nSet-Cookie: x.txt")
+    assert "\r" not in header_injection_attempt
+    assert "\n" not in header_injection_attempt
 
 
 @pytest.mark.parametrize(
@@ -122,8 +120,6 @@ def test_symlinks_are_not_listed_or_downloadable(client: TestClient, share_dir: 
 
 
 class _FakeEntry:
-    """シンボリックリンクを作れない環境でも判定を確認するための DirEntry 代わり。"""
-
     def __init__(self, path: Path, symlink: bool) -> None:
         self.name = path.name
         self.path = str(path)
@@ -156,8 +152,8 @@ def test_hidden_files_are_excluded(client: TestClient, share_dir: Path) -> None:
     if os.name == "nt":
         import ctypes
 
-        # Windowsの「隠しファイル」属性
-        assert ctypes.windll.kernel32.SetFileAttributesW(str(hidden_attr), 0x2)
+        windows_hidden_file_attribute = 0x2
+        assert ctypes.windll.kernel32.SetFileAttributesW(str(hidden_attr), windows_hidden_file_attribute)
         expected = ["visible.txt"]
     else:
         expected = ["desktop.ini", "visible.txt"]

@@ -1,12 +1,3 @@
-"""LanDrop を、ダブルクリックで起動できるアプリにまとめる。
-
-    python -m pip install -r requirements-build.txt
-    python packaging/build.py
-
-Windowsでは dist/LanDrop.exe（1ファイル）、macOSでは dist/LanDrop.app ができる。
-それぞれのOSの上で実行する（WindowsでmacOS用は作れない）。
-"""
-
 from __future__ import annotations
 
 import os
@@ -18,11 +9,18 @@ import PyInstaller.__main__
 
 ROOT = Path(__file__).resolve().parent.parent
 HERE = ROOT / "packaging"
-# 途中のファイルは、OneDriveなどの同期でロックされないよう一時フォルダに置く
-WORK = Path(tempfile.gettempdir()) / "landrop-build"
+WORK_DIR = Path(tempfile.gettempdir()) / "landrop-build"
 
 
 def main() -> None:
+    work_dir = WORK_DIR
+    static_files = [
+        "--add-data",
+        f"{ROOT / 'landrop' / 'static'}{os.pathsep}landrop/static",
+    ]
+    uvicorn_submodules = ["--collect-submodules", "uvicorn"]
+    zeroconf_submodules = ["--collect-submodules", "zeroconf"]
+    icon = ["--icon", str(HERE / "icon.png")]
     args = [
         str(HERE / "landrop_app.py"),
         "--name",
@@ -31,31 +29,22 @@ def main() -> None:
         "--clean",
         "--paths",
         str(ROOT),
-        # 画面のHTML・CSS・JavaScript。landrop/app.py からは landrop/static として見える
-        "--add-data",
-        f"{ROOT / 'landrop' / 'static'}{os.pathsep}landrop/static",
-        # Uvicorn は設定の文字列から部品を読み込むため、まとめて含めておく
-        "--collect-submodules",
-        "uvicorn",
-        # mDNS（名前のアドレス）。Cythonでビルドされた部品も含める
-        "--collect-submodules",
-        "zeroconf",
-        # PNGからOSごとのアイコン形式への変換には Pillow を使う
-        "--icon",
-        str(HERE / "icon.png"),
+        *static_files,
+        *uvicorn_submodules,
+        *zeroconf_submodules,
+        *icon,
         "--distpath",
         str(ROOT / "dist"),
         "--workpath",
-        str(WORK),
+        str(work_dir),
         "--specpath",
-        str(WORK),
+        str(work_dir),
     ]
-    # ターミナルのウィンドウは開かない。QRコードや注意はPCの画面に出し、表示は ~/LanDrop/LanDrop.log に残す
-    args += ["--windowed"]
+    no_console_window = ["--windowed"]
+    args += no_console_window
     if sys.platform == "darwin":
         args += ["--osx-bundle-identifier", "local.landrop.app"]
     else:
-        # Windowsでは1つの exe にする
         args += ["--onefile"]
     PyInstaller.__main__.run(args)
 

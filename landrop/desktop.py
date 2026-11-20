@@ -1,5 +1,3 @@
-"""PCのデスクトップとの連携（PCの画面を開く、エクスプローラーやFinderで表示する）。"""
-
 from __future__ import annotations
 
 import importlib.util
@@ -11,30 +9,26 @@ import webbrowser
 from pathlib import Path
 
 WINDOW_TITLE = "LanDrop"
+_MESSAGE_BOX_ERROR_ICON = 0x10
+_MACOS_NEW_INSTANCE_FLAG = "-na"
 
 
 def window_available() -> bool:
-    """LanDrop自身のウィンドウ（WindowsではWebView2、macOSではWKWebView）を開けるか。"""
     return importlib.util.find_spec("webview") is not None
 
 
-def run_window(url: str) -> bool:
-    """LanDrop自身のウィンドウでPCの画面を開き、閉じられるまで待つ。開けなかったら False を返す。
-
-    ウィンドウはメインスレッドでしか動かせないので、サーバーは別のスレッドで動かしておく。
-    """
+def show_window_until_closed(url: str) -> bool:
     import webview
 
     webview.create_window(WINDOW_TITLE, url, width=1200, height=820, min_size=(720, 560), text_select=True)
     try:
         webview.start(gui="edgechromium" if sys.platform == "win32" else None)
-    except Exception:  # noqa: BLE001  WebView2 が入っていないなど。理由を問わずブラウザで開き直す
+    except Exception:  # noqa: BLE001
         return False
     return True
 
 
 def close_window() -> None:
-    """開いているLanDropのウィンドウを閉じる。ほかのスレッドから呼んでよい。"""
     if not window_available():
         return
     import webview
@@ -44,7 +38,6 @@ def close_window() -> None:
 
 
 def open_app_window(url: str) -> None:
-    """アドレスバーのないアプリ用のウィンドウで開く。EdgeやChromeがなければ、いつものブラウザで開く。"""
     command = _app_window_command()
     if command:
         try:
@@ -56,7 +49,6 @@ def open_app_window(url: str) -> None:
 
 
 def _app_window_command() -> list[str] | None:
-    """アプリ用のウィンドウ（--app）を開ける、Chromium系のブラウザを起動するコマンド。"""
     if sys.platform == "win32":
         roots = [os.environ.get(name) for name in ("ProgramFiles(x86)", "ProgramFiles", "LocalAppData")]
         for root in filter(None, roots):
@@ -67,8 +59,7 @@ def _app_window_command() -> list[str] | None:
     elif sys.platform == "darwin":
         for app in ("Google Chrome", "Microsoft Edge"):
             if Path(f"/Applications/{app}.app").is_dir():
-                # 起動済みのブラウザにも引数を渡せるよう、-n で新しく起動させる
-                return ["open", "-na", app, "--args"]
+                return ["open", _MACOS_NEW_INSTANCE_FLAG, app, "--args"]
     else:
         for name in ("microsoft-edge", "google-chrome", "chromium"):
             exe = shutil.which(name)
@@ -78,10 +69,9 @@ def _app_window_command() -> list[str] | None:
 
 
 def reveal(path: Path) -> None:
-    """ファイルを選んだ状態で、エクスプローラー（macOSはFinder）を開く。"""
     if sys.platform == "win32":
-        # Windowsのパスには「"」を使えないため、そのまま囲んでよい
-        subprocess.Popen(f'explorer.exe /select,"{path}"')
+        quoted_path = f'"{path}"'
+        subprocess.Popen(f"explorer.exe /select,{quoted_path}")
     elif sys.platform == "darwin":
         subprocess.Popen(["open", "-R", str(path)])
     else:
@@ -89,11 +79,10 @@ def reveal(path: Path) -> None:
 
 
 def alert(title: str, message: str) -> None:
-    """画面のないアプリとして起動したときに、エラーを知らせる。"""
     if sys.platform == "win32":
         import ctypes
 
-        ctypes.windll.user32.MessageBoxW(None, message, title, 0x10)  # type: ignore[attr-defined]
+        ctypes.windll.user32.MessageBoxW(None, message, title, _MESSAGE_BOX_ERROR_ICON)  # type: ignore[attr-defined]
     elif sys.platform == "darwin":
         quoted = [text.replace("\\", "\\\\").replace('"', '\\"') for text in (title, message)]
         subprocess.run(["osascript", "-e", f'display alert "{quoted[0]}" message "{quoted[1]}"'], check=False)

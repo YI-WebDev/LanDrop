@@ -1,7 +1,8 @@
-// LanDrop スマホ画面とPC画面で共通に使う小さな関数（ビルド工程なしの素のJavaScript）
 "use strict";
 
 const $ = (id) => document.getElementById(id);
+
+const NOT_USER_ACTIVITY_HEADERS = { "X-LanDrop-Auto": "1" };
 
 function formatSize(bytes) {
   if (!Number.isFinite(bytes)) return "—";
@@ -34,12 +35,27 @@ function extensionLabel(name) {
   return name.slice(dot + 1, dot + 5).toUpperCase();
 }
 
-function el(tag, className, text) {
+function el(tag, className, plainText) {
   const node = document.createElement(tag);
   if (className) node.className = className;
-  // ファイル名は必ず textContent で入れる（HTMLとして解釈させない）
-  if (text !== undefined) node.textContent = text;
+  if (plainText !== undefined) node.textContent = plainText;
   return node;
+}
+
+function parseJsonOrEmpty(text) {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return {};
+  }
+}
+
+function setProgressBarRatio(bar, ratio) {
+  bar.style.transform = `scaleX(${Math.min(ratio, 1)})`;
+}
+
+function clearFileInput(input) {
+  input.value = "";
 }
 
 function icon(path) {

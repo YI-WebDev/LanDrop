@@ -1,14 +1,9 @@
-/* LanDrop PCの画面のレイアウト。色や部品は ui.css のデザインシステムを使う */
-
 :root {
-  /* QRコードは、ダークモードでも白い背景でないと読み取れない */
-  --qr-bg: var(--gray-0);
+  --qr-background-always-white: var(--gray-0);
   --viewer-bg: var(--gray-950);
   --sidebar-width: 300px;
   --appbar-height: 64px;
 }
-
-/* ---------- 上部のバー ---------- */
 
 .appbar {
   position: sticky;
@@ -43,8 +38,6 @@
   font-variant-numeric: tabular-nums;
 }
 
-/* ---------- 全体の配置 ---------- */
-
 .layout {
   display: grid;
   grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
@@ -76,8 +69,6 @@
   padding: var(--space-5);
 }
 
-/* ---------- スマホで接続 ---------- */
-
 .connect-card {
   display: grid;
   justify-items: center;
@@ -94,7 +85,7 @@
   max-width: 232px;
   padding: var(--space-2);
   border-radius: var(--radius-md);
-  background: var(--qr-bg);
+  background: var(--qr-background-always-white);
   border: 1px solid var(--color-border);
 }
 
@@ -109,8 +100,6 @@
   color: var(--color-text-muted);
   font-size: var(--text-xs);
 }
-
-/* ---------- 起動時の注意と、つながらないとき ---------- */
 
 .notices {
   display: grid;
@@ -140,8 +129,6 @@
 .help li + li {
   margin-top: var(--space-1);
 }
-
-/* ---------- 覚えているスマホ ---------- */
 
 .devices-card {
   display: grid;
@@ -177,8 +164,6 @@
   font-size: var(--text-xs);
 }
 
-/* ---------- フォルダ ---------- */
-
 .folders-card {
   display: grid;
   gap: var(--space-3);
@@ -205,8 +190,6 @@
   font-size: var(--text-xs);
   line-height: 1.4;
 }
-
-/* ---------- 切り替え ---------- */
 
 .segmented {
   display: inline-flex;
@@ -256,8 +239,6 @@
   border-radius: 50%;
   background: var(--color-primary);
 }
-
-/* ---------- スマホへ送る ---------- */
 
 .dropzone {
   display: grid;
@@ -310,7 +291,6 @@
   margin: var(--space-6) 0 var(--space-3);
 }
 
-/* 受信中の一覧が空なら、見出しを切り替えのすぐ下に置く */
 .panel > .queue:first-child:empty + .section-head {
   margin-top: 0;
 }
@@ -323,8 +303,6 @@
   display: flex;
   gap: var(--space-1);
 }
-
-/* ---------- 届いたファイル ---------- */
 
 .view-toggle {
   display: inline-flex;
@@ -475,8 +453,6 @@
   object-fit: cover;
 }
 
-/* ---------- ドロップ中の表示 ---------- */
-
 .drop-overlay {
   position: fixed;
   inset: 0;
@@ -505,8 +481,6 @@
   width: 48px;
   height: 48px;
 }
-
-/* ---------- ダイアログ ---------- */
 
 dialog {
   padding: 0;
@@ -582,8 +556,6 @@ dialog::backdrop {
   justify-content: flex-end;
   gap: var(--space-2);
 }
-
-/* ---------- お知らせ ---------- */
 
 .toast {
   position: fixed;

@@ -1,5 +1,3 @@
-"""Hostヘッダーの検証・セキュリティヘッダー・CORS・別サイトからの送信。"""
-
 from __future__ import annotations
 
 from pathlib import Path
@@ -20,8 +18,7 @@ def test_unknown_host_header_is_rejected(client: TestClient, host: str) -> None:
 
 
 @pytest.mark.parametrize("host", ["192.168.1.50:8765", "192.168.1.50", "localhost:8765", "127.0.0.1:8765"])
-def test_allowed_host_header_passes(anon_client: TestClient, host: str) -> None:
-    # Hostの検査を通過し、認証の検査で止まる
+def test_allowed_host_header_reaches_authentication(anon_client: TestClient, host: str) -> None:
     assert anon_client.get("/api/files", headers={"host": host}).status_code == 401
 
 

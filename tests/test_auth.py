@@ -1,5 +1,3 @@
-"""トークン認証・Cookie発行・未認証アクセスの拒否。"""
-
 from __future__ import annotations
 
 from pathlib import Path
@@ -9,6 +7,8 @@ from fastapi.testclient import TestClient
 from landrop.app import AppConfig
 from landrop.idle import IdleTracker
 from tests.conftest import SESSION_KEY, TOKEN
+
+TOKEN_LENGTH = 43
 
 
 def test_valid_token_sets_cookie_and_redirects_without_token(anon_client: TestClient) -> None:
@@ -21,8 +21,7 @@ def test_valid_token_sets_cookie_and_redirects_without_token(anon_client: TestCl
     assert "httponly" in cookie.lower()
     assert "samesite=lax" in cookie.lower()
     assert "path=/" in cookie.lower()
-    # Cookie にはURLのトークンそのものを入れない
-    assert TOKEN not in cookie
+    assert TOKEN not in cookie, "cookie has no url token"
 
 
 def test_after_auth_pages_are_available(client: TestClient) -> None:
@@ -30,8 +29,7 @@ def test_after_auth_pages_are_available(client: TestClient) -> None:
     assert client.get("/api/files").status_code == 200
     info = client.get("/api/info").json()
     assert info["pc_name"] == "TEST-PC"
-    # 画面に表示するアドレスにはトークンを含めない
-    assert info["address"] == "http://192.168.1.50:8765"
+    assert info["address"] == "http://192.168.1.50:8765", "address has no token"
     assert TOKEN not in client.get("/api/info").text
 
 
@@ -94,9 +92,8 @@ def test_tokens_are_random_per_launch(tmp_path: Path) -> None:
         )
 
     first, second = config(), config()
-    # secrets.token_urlsafe(32) は43文字
-    assert len(first.token) == 43
-    assert first.token != second.token
-    assert first.token != first.session_key
-    assert first.access_url == f"http://192.168.1.2:8765/auth?t={first.token}"
-    assert first.token not in first.base_url
+    assert len(first.phone_url_token) == TOKEN_LENGTH
+    assert first.phone_url_token != second.phone_url_token
+    assert first.phone_url_token != first.phone_cookie_secret
+    assert first.access_url == f"http://192.168.1.2:8765/auth?t={first.phone_url_token}"
+    assert first.phone_url_token not in first.base_url

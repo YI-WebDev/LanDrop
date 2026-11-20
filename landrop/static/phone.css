@@ -1,5 +1,3 @@
-/* LanDrop スマホ画面のレイアウト。色や部品は ui.css のデザインシステムを使う */
-
 :root {
   --tabbar-height: 64px;
   --safe-bottom: env(safe-area-inset-bottom, 0px);
@@ -8,8 +6,6 @@
 body {
   padding-bottom: calc(var(--tabbar-height) + var(--safe-bottom) + var(--space-6));
 }
-
-/* ---------- 上部の接続先表示 ---------- */
 
 .topbar {
   position: sticky;
@@ -52,8 +48,6 @@ body {
   color: var(--color-text-muted);
   font-variant-numeric: tabular-nums;
 }
-
-/* ---------- 本文 ---------- */
 
 main {
   max-width: 640px;
@@ -105,7 +99,6 @@ main > .notice {
   margin-top: 28px;
 }
 
-/* 共有ファイルの「保存」 */
 .file-save {
   display: inline-flex;
   align-items: center;
@@ -124,7 +117,6 @@ main > .notice {
   height: 18px;
 }
 
-/* 送信ボタンは、一覧が長くなっても親指の届く位置に残す */
 .send-actions {
   position: sticky;
   bottom: calc(var(--tabbar-height) + var(--safe-bottom) + var(--space-3));
@@ -139,8 +131,6 @@ main > .notice {
   outline: var(--focus-ring);
   outline-offset: 2px;
 }
-
-/* ---------- 下部のタブ（親指で届く位置） ---------- */
 
 .tabbar {
   position: fixed;

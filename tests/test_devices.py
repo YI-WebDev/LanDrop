@@ -1,5 +1,3 @@
-"""一度接続したスマホを覚えて、次の起動からQRコードなしで通す仕組み。"""
-
 from __future__ import annotations
 
 import json
@@ -30,9 +28,6 @@ PC_SESSION_KEY = "pc-session-key"
 IPHONE_UA = "Mozilla/5.0 (iPhone; CPU iPhone OS 26_0 like Mac OS X) AppleWebKit/605.1.15 Safari/604.1"
 
 
-# ---------- 端末の一覧（DeviceStore） ----------
-
-
 def test_register_and_authenticate(tmp_path: Path) -> None:
     store = DeviceStore(tmp_path / "devices.json")
     secret = store.register("iPhone")
@@ -52,20 +47,18 @@ def test_devices_survive_restart_and_file_has_no_secret(tmp_path: Path) -> None:
     assert DeviceStore(path).authenticate(secret) is not None
 
 
-def test_unused_device_expires_but_used_device_stays(tmp_path: Path) -> None:
+def test_device_in_use_outlives_ttl_and_unused_expires(tmp_path: Path) -> None:
     clock = FakeClock()
     store = DeviceStore(tmp_path / "devices.json", clock=clock)
     used, unused = store.register("iPhone"), store.register("Android")
 
-    # 使い続けている端末は、最初の登録から30日を過ぎても忘れない
     for _ in range(4):
         clock.advance(DEVICE_TTL_SECONDS / 2)
         assert store.authenticate(used) is not None
     assert store.authenticate(unused) is None
     assert [d["label"] for d in store.list()] == ["iPhone"]
-    # 起動し直しても、期限切れの端末は読み込まない
     clock.advance(DEVICE_TTL_SECONDS)
-    assert DeviceStore(tmp_path / "devices.json", clock=clock).list() == []
+    assert DeviceStore(tmp_path / "devices.json", clock=clock).list() == [], "expired not loaded"
 
 
 def test_oldest_device_is_dropped_over_the_limit(tmp_path: Path) -> None:
@@ -112,8 +105,7 @@ def test_handoff_is_one_time_and_expires(tmp_path: Path) -> None:
     clock.advance(HANDOFF_TTL_SECONDS + 1)
     assert store.redeem_handoff(late or "") is None
     assert store.create_handoff("no-such-device") is None
-    # 端末の一覧は増えない（同じ端末にアドレスごとの鍵が増えるだけ）
-    assert len(store.list()) == 1
+    assert len(store.list()) == 1, "same device only"
 
 
 def test_keys_per_device_are_capped_by_least_recent_use() -> None:
@@ -123,13 +115,11 @@ def test_keys_per_device_are_capped_by_least_recent_use() -> None:
     assert device_id is not None
     keys = [store.redeem_handoff(store.create_handoff(device_id) or "") for _ in range(MAX_KEYS_PER_DEVICE)]
 
-    # 誰も使っていない最初の鍵が消える
-    assert store.authenticate(first) is None
+    assert store.authenticate(first) is None, "first key dropped"
     assert all(store.authenticate(k or "") == device_id for k in keys)
 
 
-def test_key_in_use_survives_repeated_handoffs() -> None:
-    # IPアドレスのページをホーム画面に置き、開くたびに名前のアドレスへ移るような使い方
+def test_ip_key_survives_repeated_handoffs() -> None:
     store = DeviceStore(None)
     ip_key = store.register("iPhone")
     for _ in range(MAX_KEYS_PER_DEVICE * 3):
@@ -149,13 +139,14 @@ def test_handoff_to_an_address_that_already_has_the_key_adds_nothing() -> None:
     for _ in range(MAX_KEYS_PER_DEVICE * 2):
         token = store.create_handoff(device_id) or ""
         assert store.redeem_handoff(token, current_device=device_id) == ALREADY_REMEMBERED
-        # 使い捨ての鍵は、このときも使い切る
-        assert store.redeem_handoff(token, current_device=device_id) is None
+        assert store.redeem_handoff(token, current_device=device_id) is None, "token consumed"
     assert store.authenticate(ip_key) == device_id
     assert store.authenticate(local_key) == device_id
-    # 別の端末の鍵を持っていても、その端末として扱わない（新しい鍵を渡す）
-    other = store.authenticate(store.register("Android"))
-    assert store.redeem_handoff(store.create_handoff(device_id) or "", current_device=other)
+    other_device_id = store.authenticate(store.register("Android"))
+    key_for_other_device = store.redeem_handoff(
+        store.create_handoff(device_id) or "", current_device=other_device_id
+    )
+    assert key_for_other_device
 
 
 @pytest.mark.parametrize(
@@ -172,13 +163,12 @@ def test_handoff_to_an_address_that_already_has_the_key_adds_nothing() -> None:
         '{"devices": ["a", null]}',
     ],
 )
-def test_broken_file_starts_empty(tmp_path: Path, content: str) -> None:
+def test_broken_file_starts_empty_then_is_rewritten(tmp_path: Path, content: str) -> None:
     path = tmp_path / "devices.json"
     path.write_text(content, encoding="utf-8")
 
     store = DeviceStore(path)
     assert store.list() == []
-    # 壊れたファイルは、次の登録で書き直される
     secret = store.register("iPhone")
     assert DeviceStore(path).authenticate(secret) is not None
 
@@ -197,9 +187,6 @@ def test_device_label() -> None:
     assert device_label(IPHONE_UA) == "iPhone"
     assert device_label("Mozilla/5.0 (Linux; Android 16; Pixel 10) Chrome/140") == "Android"
     assert device_label("") == "端末"
-
-
-# ---------- サーバー ----------
 
 
 @pytest.fixture
@@ -231,8 +218,7 @@ def test_qr_auth_remembers_the_phone(make_app: Callable[..., TestClient], store:
     cookie = response.headers["set-cookie"].lower()
     assert cookie.startswith(f"{DEVICE_COOKIE_NAME}=")
     assert "httponly" in cookie and "samesite=lax" in cookie and "max-age=" in cookie
-    # 端末を覚えるときは、起動ごとのセッションCookieは使わない（解除をすぐに効かせるため）
-    assert "landrop_session" not in cookie
+    assert "landrop_session" not in cookie, "no session cookie"
     assert TOKEN not in cookie
     assert [d["label"] for d in store.list()] == ["iPhone"]
     assert phone.get("/api/info").json()["remembered"] is True
@@ -253,8 +239,11 @@ def test_remembered_phone_needs_no_qr_after_restart(
     phone.get(f"/auth?t={TOKEN}")
     cookie = phone.cookies[DEVICE_COOKIE_NAME]
 
-    # 起動し直すと、QRコードのトークンもセッションの鍵も変わる
-    restarted = make_app(token="new-token", session_key="new-session", devices=DeviceStore(tmp_path / "devices.json"))
+    restarted = make_app(
+        phone_url_token="new-token",
+        phone_cookie_secret="new-session",
+        devices=DeviceStore(tmp_path / "devices.json"),
+    )
     assert restarted.get("/api/files").status_code == 401
     restarted.cookies.set(DEVICE_COOKIE_NAME, cookie)
     assert restarted.get("/api/files").status_code == 200
@@ -286,25 +275,22 @@ def test_handoff_moves_the_phone_to_the_local_name(
     assert url.startswith(f"{LOCAL_BASE}/auth?h=")
     assert TOKEN not in url
 
-    # 名前のアドレスはCookieが別。使い捨ての鍵で、このアドレス用の鍵を受け取る
     local = make_app(base_url=LOCAL_BASE)
-    assert local.get("/api/files").status_code == 401
+    assert local.get("/api/files").status_code == 401, "phone unknown at local name"
     redirected = local.get(url.removeprefix(LOCAL_BASE), follow_redirects=False)
     assert redirected.status_code == 303
     assert redirected.headers["location"] == "/"
     assert local.get("/api/files").status_code == 200
     assert len(store.list()) == 1
-    # すでに名前のアドレスの鍵を持っていれば、もう一度移っても鍵を増やさない
     before = json.loads(store_path.read_text(encoding="utf-8"))["devices"][0]["key_hashes"]
     second = phone.post("/api/handoff", headers={"Origin": BASE_URL}).json()["url"]
     response = local.get(second.removeprefix(LOCAL_BASE), follow_redirects=False)
     assert response.status_code == 303
     assert "set-cookie" not in response.headers
     assert local.get("/api/files").status_code == 200
-    assert sorted(store._devices[next(iter(store._devices))].key_hashes) == sorted(before)  # noqa: SLF001
-    # 同じ鍵はもう使えない
+    assert sorted(store._devices[next(iter(store._devices))].key_hashes) == sorted(before), "key hashes unchanged"
     again = make_app(base_url=LOCAL_BASE)
-    assert again.get(url.removeprefix(LOCAL_BASE), follow_redirects=False).status_code == 403
+    assert again.get(url.removeprefix(LOCAL_BASE), follow_redirects=False).status_code == 403, "reused token rejected"
 
 
 def test_handoff_requires_a_remembered_phone_and_same_origin(make_app: Callable[..., TestClient]) -> None:
@@ -319,10 +305,9 @@ def test_handoff_requires_a_remembered_phone_and_same_origin(make_app: Callable[
     no_name.get(f"/auth?t={TOKEN}")
     assert no_name.post("/api/handoff").status_code == 404
 
-    # 起動ごとのセッションCookieで入った端末（覚えていない端末）には出さない
-    session_only = make_app()
-    session_only.cookies.set("landrop_session", "test-session-key")
-    assert session_only.post("/api/handoff").status_code == 404
+    session_cookie_phone = make_app()
+    session_cookie_phone.cookies.set("landrop_session", "test-session-key")
+    assert session_cookie_phone.post("/api/handoff").status_code == 404
 
 
 def test_invalid_handoff_token_is_rejected(make_app: Callable[..., TestClient]) -> None:
@@ -345,11 +330,8 @@ def test_local_name_is_an_allowed_host_and_probe_image_is_allowed(make_app: Call
     assert "img-src 'self' data:;" in plain
 
 
-# ---------- PCの画面での一覧と解除 ----------
-
-
 def _pc_client(make_config: Callable[..., AppConfig], store: DeviceStore) -> TestClient:
-    config = make_config(pc_token=PC_TOKEN, pc_session_key=PC_SESSION_KEY, devices=store, local_name=LOCAL_NAME)
+    config = make_config(pc_url_token=PC_TOKEN, pc_cookie_secret=PC_SESSION_KEY, devices=store, local_name=LOCAL_NAME)
     client = TestClient(create_app(config), base_url=f"http://127.0.0.1:{PORT}", client=("127.0.0.1", 50000))
     assert client.get(f"/pc/auth?t={PC_TOKEN}").status_code == 200
     return client
@@ -375,8 +357,7 @@ def test_pc_lists_and_forgets_devices(
         assert pc.post(f"/pc/api/devices/forget?id={devices[0]['id']}", headers=origin).status_code == 404
         assert pc.get("/pc/api/devices").json()["devices"] == []
 
-    # 解除はすぐに効く
-    assert phone.get("/api/files").status_code == 401
+    assert phone.get("/api/files").status_code == 401, "forgotten phone rejected"
 
 
 def test_phone_cannot_use_device_api(make_app: Callable[..., TestClient]) -> None:
@@ -384,9 +365,6 @@ def test_phone_cannot_use_device_api(make_app: Callable[..., TestClient]) -> Non
     phone.get(f"/auth?t={TOKEN}")
     assert phone.get("/pc/api/devices").status_code == 404
     assert phone.post("/pc/api/devices/forget?id=x").status_code == 404
-
-
-# ---------- 名前と、前回のポート ----------
 
 
 @pytest.mark.parametrize(
@@ -408,17 +386,16 @@ def test_fallback_port_is_not_remembered() -> None:
     assert cli._last_port() is None
     cli._remember_port(8765, 8765)
     assert cli._last_port() == 8765
-    # 前回の番号が一時的に使われていても、覚えている番号は変えない
     cli._remember_port(8765, 8770)
-    assert cli._last_port() == 8765
+    assert cli._last_port() == 8765, "remembered port kept"
 
 
 def test_last_port_is_remembered(tmp_path: Path) -> None:
     assert cli._last_port() is None
-    cli._save_last_port(8766)
+    cli._save_last_port_if_possible(8766)
     assert cli._last_port() == 8766
     for broken in ("{", '{"port": "8765"}', '{"port": 80}', "[]"):
-        cli.STATE_FILE.write_text(broken, encoding="utf-8")
+        cli.LAST_PORT_STATE_FILE.write_text(broken, encoding="utf-8")
         assert cli._last_port() is None, broken
 
 
